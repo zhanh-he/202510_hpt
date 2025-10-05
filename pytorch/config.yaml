@@ -1,0 +1,79 @@
+wandb:
+  project: "2025_waspaa"
+  name: "${model.name}-ext${model.input2}${model.input3}-iter${exp.total_iteration}-lr${exp.learning_rate}-decay${exp.decay}${exp.reduce_iteration}-seed${exp.random_seed}" # -iter${exp.total_iteration}
+
+exp:
+  workspace: "./workspaces" # "/mnt/d/ipynb/202412 ISMIR update/202502_mamba/workspaces"
+  resume_iteration: 0
+  total_iteration: 200_000 # 300_000 # 360_000
+  save_iteration: 5_000 # 6_000 # 6_000
+  eval_iteration: 5_000 # 6_000 # 6_000
+
+  learning_rate: 1e-4 # 3e-4 # 1e-4
+  optim: "adam" # "adam", "ranger", Ranger: default betas=(0.9, 0.999), eps=1e-08, weight_decay=0.
+  decay: True # False
+  reduce_iteration: 10_000 # 6_000
+  loss_type: "velocity_bce"
+  random_seed: 13
+
+  mini_data: False # True when developing model
+  cuda: True
+  debug: False
+  num_workers: 12 # 6 for Score Calculating
+  batch_size: 12
+
+  # Infer and Eval
+  run_infer: 'single' # 'multi'
+  ckpt_iteration: ""  # 180_000
+
+
+feature:
+  segment_seconds: 10.
+  hop_seconds: 1.
+  frames_per_second: 100
+  sample_rate: 16000
+  classes_num: 88
+  begin_note: 21
+  velocity_scale: 128
+  max_note_shift: 0
+  augmentor: null
+
+
+dataset:
+  # Fix "maestro" for (train valid), select "smd|maestro|map" for (test)
+  train_set: "maestro"
+  test_set: "smd"
+
+  train_h5: "./workspaces/hdf5s/${dataset.train_set}"
+  test_h5: "./workspaces/hdf5s/${dataset.test_set}"
+
+  # Provide dataset dir to process the features.py
+  smd_dir: "/mnt/d/ipynb/dataset/SMD"
+  maestro_dir: "/mnt/d/ipynb/dataset/maestro-v3.0.0"
+  maps_dir: "/mnt/d/ipynb/dataset/MAPS_dataset"
+
+
+model:
+  type: "velo" # "notes"
+  name: "Single_Velo_Mamba1" # 'Single_Velocity_HPT', 'Dual_Velocity_HPT', 'Triple_Velocity_HPT'
+  input2: null # onset, offset, frame, exframe, null - None
+  input3: null # onset, offset, frame, exframe, null - None
+
+
+post:
+  post_processor_type: 'regression' # 'onsets_frames'
+  # regression (0.1, 0.3, 0.3), onsets_frames (0.5, 0.1, 0.3)
+  frame_threshold: 0.3 # 0.1 in RegressionPostProcessor, 0.3 in score_calculator
+  onset_threshold: 0.3
+  offset_threshold: 0.3
+  pedal_offset_threshold: 0.2
+  
+
+score:
+  evaluate_frame: True
+  evaluate_velocity: True
+  evaluate_pedal: False # No implemented yet
+  
+  onset_tolerance: 0.05 # 1
+  offset_ratio: 0.2 # null | 0.2
+  offset_min_tolerance: # 0.05 # 1
