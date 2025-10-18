@@ -3,18 +3,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio.transforms as T
+from feature_extractor import get_feature_extractor_and_bins
 from pytorch_utils import move_data_to_device
 from mamba_ssm import Mamba
 from einops import rearrange
 
 class Rearrange(nn.Module):
     def __init__(self, pattern):
-        super(Rearrange, self).__init__()
+        super().__init__()
         self.pattern = pattern
-
     def forward(self, x):
         return rearrange(x, self.pattern)
-
 
 def init_layer(layer):
     """Initialize a Linear or Convolutional layer. """
@@ -24,14 +23,12 @@ def init_layer(layer):
             layer.bias.data.fill_(0.)
             # nn.init.zeros_(layer.bias)
 
-
 def init_bn(bn):
     """Initialize a Batchnorm layer. """
     bn.bias.data.fill_(0.)
     bn.weight.data.fill_(1.)
     # nn.init.zeros_(layer.bias)
     # nn.init.ones_(bn.weight)
-
 
 def init_bilstm(lstm):
     """Initialize weights for a Bidirectional LSTM layer."""
@@ -42,193 +39,150 @@ def init_bilstm(lstm):
             nn.init.zeros_(param)
             # nn.init.constant_(param, 0.0)
 
-
 def init_gru(rnn):
-    """Initialize a GRU layer. """
-    def _concat_init(tensor, init_funcs):
-        (length, fan_out) = tensor.shape
-        fan_in = length // len(init_funcs)
-        for (i, init_func) in enumerate(init_funcs):
-            init_func(tensor[i * fan_in: (i + 1) * fan_in, :])
+    """Initialize GRU weights and biases for better convergence."""
+    def _concat_init(tensor, inits):
+        fan_in = tensor.shape[0] // len(inits)
+        for i, fn in enumerate(inits):
+            fn(tensor[i * fan_in:(i + 1) * fan_in])
     def _inner_uniform(tensor):
         fan_in = nn.init._calculate_correct_fan(tensor, 'fan_in')
-        nn.init.uniform_(tensor, -math.sqrt(3 / fan_in), math.sqrt(3 / fan_in))
-    for i in range(rnn.num_layers):
-        _concat_init(
-            getattr(rnn, 'weight_ih_l{}'.format(i)),
-            [_inner_uniform, _inner_uniform, _inner_uniform]
-        )
-        torch.nn.init.constant_(getattr(rnn, 'bias_ih_l{}'.format(i)), 0)
+        bound = math.sqrt(3 / fan_in)
+        nn.init.uniform_(tensor, -bound, bound)
 
-        _concat_init(
-            getattr(rnn, 'weight_hh_l{}'.format(i)),
-            [_inner_uniform, _inner_uniform, nn.init.orthogonal_]
-        )
-        torch.nn.init.constant_(getattr(rnn, 'bias_hh_l{}'.format(i)), 0)
+    for i in range(rnn.num_layers):
+        _concat_init(getattr(rnn, f'weight_ih_l{i}'),
+                     [_inner_uniform, _inner_uniform, _inner_uniform])
+        nn.init.constant_(getattr(rnn, f'bias_ih_l{i}'), 0.)
+
+        _concat_init(getattr(rnn, f'weight_hh_l{i}'),
+                     [_inner_uniform, _inner_uniform, nn.init.orthogonal_])
+        nn.init.constant_(getattr(rnn, f'bias_hh_l{i}'), 0.)
 
 ################ Mamba Session ################# Block and Module ##############
 ################################################################################
 
 class Mamba1(nn.Module):
-    def __init__(self, classes_num, midfeat, momentum):
-        super(Mamba1, self).__init__()
-        self.conv_block1 = HPTConvBlock(in_channels=1, out_channels=48, momentum=momentum)
-        self.conv_block2 = HPTConvBlock(in_channels=48, out_channels=64, momentum=momentum)
-        self.conv_block3 = HPTConvBlock(in_channels=64, out_channels=96, momentum=momentum)
-        self.conv_block4 = HPTConvBlock(in_channels=96, out_channels=128, momentum=momentum)
-        self.fc5 = nn.Linear(in_features=midfeat, out_features=768, bias=False)
-        self.bn5 = nn.BatchNorm1d(768, momentum=momentum)
-        self.mamba = Mamba( # Replace GRU with Mamba
-            d_model=768,    # Model dimension
-            d_state=16,     # SSM state expansion factor
-            d_conv=4,       # Local convolution width
-            expand=2)       # Block expansion factor
-        self.layer_norm = nn.LayerNorm(768)  # Normalize before Mamba
-        self.proj = nn.Linear(in_features=768, out_features=classes_num, bias=True)
-        self.init_weight()
-
-    def init_weight(self):
-        init_layer(self.fc5)
-        init_bn(self.bn5)
-        init_layer(self.proj)
-
-    def forward(self, input):
-        x = self.conv_block1(input)
-        x = F.dropout(x, p=0.2, training=self.training)
-        x = self.conv_block2(x)
-        x = F.dropout(x, p=0.2, training=self.training)
-        x = self.conv_block3(x)
-        x = F.dropout(x, p=0.2, training=self.training)
-        x = self.conv_block4(x)
-        x = F.dropout(x, p=0.2, training=self.training)
-
-        x = x.transpose(1, 2).flatten(2)  # Transform for linear layer
-        x = F.relu(self.bn5(self.fc5(x).transpose(1, 2)).transpose(1, 2))
-        x = F.dropout(x, p=0.5, training=self.training)
-
-        # Use Mamba directly
-        x = self.layer_norm(x)
-        x = self.mamba(x)
-        x = F.dropout(x, p=0.5, training=self.training)
-
-        output = torch.sigmoid(self.proj(x))
-        return output
-
-
-class Mamba2(nn.Module):
-    def __init__(self, classes_num, midfeat, momentum):
-        super(Mamba2, self).__init__()
-        self.conv_block1 = HPTConvBlock(in_channels=1, out_channels=48, momentum=momentum)
-        self.conv_block2 = HPTConvBlock(in_channels=48, out_channels=64, momentum=momentum)
-        self.conv_block3 = HPTConvBlock(in_channels=64, out_channels=96, momentum=momentum)
-        self.conv_block4 = HPTConvBlock(in_channels=96, out_channels=128, momentum=momentum)
-        self.fc5 = nn.Linear(in_features=midfeat, out_features=768, bias=False)
-        self.bn5 = nn.BatchNorm1d(768, momentum=momentum)
-        
-        mamba_insize=768
-        self.layer_norm = nn.LayerNorm(mamba_insize)  # Normalize before Mamba
-        self.mamba = Mamba( # Replace GRU with Mamba
-            d_model=mamba_insize,    # Model dimension
-            d_state=16,     # SSM state expansion factor
-            d_conv=4,       # Local convolution width
-            expand=2)       # Block expansion factor
-        self.mamba_layer = nn.Sequential(
-            nn.LayerNorm(768), self.mamba) # mamba input_size
-        self.conv_layer = nn.Sequential(nn.LayerNorm(mamba_insize),
-                                Rearrange('b n c -> b c n'),
-                                nn.Conv1d(mamba_insize, mamba_insize, kernel_size=31,groups=mamba_insize,padding='same'),
-                                Rearrange('b c n -> b n c')
-                                )
-        self.proj = nn.Linear(in_features=mamba_insize, out_features=classes_num, bias=True)
-        self.init_weight()
-
-    def init_weight(self):
-        init_layer(self.fc5)
-        init_bn(self.bn5)
-        init_layer(self.proj)
-
-    def forward(self, input):
-        x = self.conv_block1(input)
-        x = F.dropout(x, p=0.2, training=self.training)
-        x = self.conv_block2(x)
-        x = F.dropout(x, p=0.2, training=self.training)
-        x = self.conv_block3(x)
-        x = F.dropout(x, p=0.2, training=self.training)
-        x = self.conv_block4(x)
-        x = F.dropout(x, p=0.2, training=self.training)
-
-        x = x.transpose(1, 2).flatten(2)  # Transform for linear layer
-        x = F.relu(self.bn5(self.fc5(x).transpose(1, 2)).transpose(1, 2))
-        x = F.dropout(x, p=0.5, training=self.training)
-
-        # Use Mamba - FasNet Method
-        mamba_input = self.layer_norm(x)
-        mamba_output = self.mamba(mamba_input)
-        mamba_output = mamba_input + self.mamba_layer(mamba_input)
-        output = self.conv_layer(mamba_output)
-        mamba_output = self.proj(mamba_output.contiguous().view(-1, mamba_output.shape[2])).view(mamba_input.shape)
-        output = output + mamba_output
-        return output
-
-class Single_Velo_Mamba1(nn.Module):
-    def __init__(self, frames_per_second, classes_num):
-        super(Single_Velo_Mamba1, self).__init__()
-        sample_rate, window_size, mel_bins, fmin = 16000, 2048, 229, 30
-        fmax, hop_size = sample_rate//2, sample_rate//frames_per_second # 16000Hz/100fps = 160steps/s
-        midfeat, momentum = 1792, 0.01
-        # Log Mel Spectrogram extractor
-        self.logmel_extractor = T.MelSpectrogram(sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size, win_length=window_size,
-                                                 center=True, pad_mode="reflect", n_mels=mel_bins, f_min=fmin, f_max=fmax)
-        self.bn0 = nn.BatchNorm2d(mel_bins, momentum)
-        self.velocity_model = Mamba1(classes_num, midfeat, momentum)  # OriginalModelHPT2020
+    """基础版：单层 Mamba 替代 GRU，用于速度估计"""
+    def __init__(self, classes_num, input_shape, momentum):
+        super().__init__()
+        self.conv_block1 = HPTConvBlock(1, 48, momentum)
+        self.conv_block2 = HPTConvBlock(48, 64, momentum)
+        self.conv_block3 = HPTConvBlock(64, 96, momentum)
+        self.conv_block4 = HPTConvBlock(96, 128, momentum)
+        with torch.no_grad():
+            dummy = torch.zeros((1, 1, 1000, input_shape))
+            x = self.conv_block4(self.conv_block3(self.conv_block2(self.conv_block1(dummy))))
+            midfeat = x.shape[2] * x.shape[3]
+        self.fc5 = nn.Linear(midfeat, 768, bias=False)
+        self.bn5 = nn.BatchNorm1d(768, momentum)
+        self.mamba = Mamba(d_model=768, d_state=16, d_conv=4, expand=2)
+        self.layer_norm = nn.LayerNorm(768)
+        self.proj = nn.Linear(768, classes_num)
         self.init_weight()
     def init_weight(self):
+        init_layer(self.fc5); init_bn(self.bn5); init_layer(self.proj)
+    def forward(self, x):
+        for block in [self.conv_block1, self.conv_block2, self.conv_block3, self.conv_block4]:
+            x = F.dropout(block(x), 0.2, self.training)
+        x = F.relu(self.bn5(self.fc5(x.transpose(1,2).flatten(2)).transpose(1,2)).transpose(1,2))
+        x = F.dropout(self.mamba(self.layer_norm(x)), 0.5, self.training)
+        return torch.sigmoid(self.proj(x))
+
+# ============== Mamba2 (FasNet风格改进版，可切换) ==============
+# class Mamba2(nn.Module):
+#     """
+#     改进版：融合卷积通道 + 双层 Mamba 模块，具备残差路径。
+#     参考 FasNet 结构，适合长序列学习。
+#     """
+#     def __init__(self, classes_num, input_shape, momentum):
+#         super().__init__()
+#         self.conv_block1 = HPTConvBlock(1,48,momentum); self.conv_block2 = HPTConvBlock(48,64,momentum)
+#         self.conv_block3 = HPTConvBlock(64,96,momentum); self.conv_block4 = HPTConvBlock(96,128,momentum)
+#         with torch.no_grad():
+#             dummy=torch.zeros((1,1,1000,input_shape));x=self.conv_block4(self.conv_block3(self.conv_block2(self.conv_block1(dummy))))
+#             midfeat=x.shape[2]*x.shape[3]
+#         self.fc5=nn.Linear(midfeat,768,bias=False);self.bn5=nn.BatchNorm1d(768,momentum)
+#         self.mamba=Mamba(d_model=768,d_state=16,d_conv=4,expand=2)
+#         self.mamba_layer=nn.Sequential(nn.LayerNorm(768),self.mamba)
+#         self.conv_layer=nn.Sequential(nn.LayerNorm(768),Rearrange('b n c -> b c n'),
+#             nn.Conv1d(768,768,31,groups=768,padding='same'),Rearrange('b c n -> b n c'))
+#         self.proj=nn.Linear(768,classes_num); self.init_weight()
+#     def init_weight(self): init_layer(self.fc5);init_bn(self.bn5);init_layer(self.proj)
+#     def forward(self,x):
+#         for b in [self.conv_block1,self.conv_block2,self.conv_block3,self.conv_block4]:
+#             x=F.dropout(b(x),0.2,self.training)
+#         x=F.relu(self.bn5(self.fc5(x.transpose(1,2).flatten(2)).transpose(1,2)).transpose(1,2))
+#         m_in=self.mamba_layer[0](x);m_out=self.mamba(m_in);m_out=m_in+m_out
+#         c_out=self.conv_layer(m_out);p_out=self.proj(m_out.contiguous().view(-1,m_out.shape[2])).view(m_in.shape)
+#         return torch.sigmoid(c_out+p_out)
+
+class Single_Velo_Mamba(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        sr, fft, fps, feat, cls = cfg.feature.sample_rate, cfg.feature.fft_size, cfg.feature.frames_per_second, cfg.feature.audio_feature, cfg.feature.classes_num
+        self.feature_extractor, self.FRE = get_feature_extractor_and_bins(feat, sr, fft, fps)
+        self.bn0 = nn.BatchNorm2d(self.FRE, 0.01)
+        self.velocity_model = Mamba1(cls, self.FRE, 0.01)
+        # self.velocity_model = Mamba2(cls, self.FRE, 0.01)
         init_bn(self.bn0)
-    def forward(self, input):
-        """Args: input: (batch_size, data_length)
-        Outputs: output_dict: dict, {'velocity_output': (batch_size, time_steps, classes_num)}
-        """        # batch=12, ch=1, timsteps=10sx100steps/s=1001steps, melbins=229 (old version, torchlibrosa)
-        x = self.logmel_extractor(input)  	# batch=12, melbins=229, timsteps=1001 (new,torchaudio)
-        x = x.unsqueeze(3)                  # batch=12, melbins=229, timsteps=1001, ch=1
-        x = self.bn0(x)					    # batch=12, melbins=229, timsteps=1001, ch=1
-        x = x.transpose(1, 3)				# batch=12, ch=1, timsteps=1001, melbins=229
-        est_velocity = self.velocity_model(x)  	# batch=12, timsteps=1001, classes_num=88
-        output_dict = {'velocity_output': est_velocity}
-        return output_dict
+    def forward(self, x):
+        x = self.bn0(self.feature_extractor(x).unsqueeze(3)).transpose(1,3)
+        return {'velocity_output': self.velocity_model(x)}
 
+class Dual_Velo_Mamba(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        sr, fft, fps, feat, cls = cfg.feature.sample_rate, cfg.feature.fft_size, cfg.feature.frames_per_second, cfg.feature.audio_feature, cfg.feature.classes_num
+        self.feature_extractor, self.FRE = get_feature_extractor_and_bins(feat, sr, fft, fps)
+        self.bn0 = nn.BatchNorm2d(self.FRE, 0.01)
+        self.velocity_model = Mamba1(cls, self.FRE, 0.01)
+        # self.velocity_model = Mamba2(cls, self.FRE, 0.01)
+        self.bilstm = nn.LSTM(176, 256, 1, batch_first=True, bidirectional=True)
+        self.velo_fc = nn.Linear(512, cls)
+        init_bn(self.bn0); init_bilstm(self.bilstm); init_layer(self.velo_fc)
+    def forward(self, x1, x2):
+        x = self.bn0(self.feature_extractor(x1).unsqueeze(3)).transpose(1,3)
+        pre = self.velocity_model(x)
+        # --- TypeA ---
+        x = torch.cat((pre, x2), 2)
+        # --- TypeB ---
+        # x = torch.cat((pre, (pre.detach()**0.5)*x2), 2)
+        # --- TypeC ---
+        # x = torch.cat((pre, ((pre.detach()+x2)**0.5)*x2), 2)
+        x,_=self.bilstm(x)
+        return {'velocity_output': torch.sigmoid(self.velo_fc(x))}
 
-class Single_Velo_Mamba2(nn.Module):
-    def __init__(self, frames_per_second, classes_num):
-        super(Single_Velo_Mamba2, self).__init__()
-        sample_rate, window_size, mel_bins, fmin = 16000, 2048, 229, 30
-        fmax, hop_size = sample_rate//2, sample_rate//frames_per_second # 16000Hz/100fps = 160steps/s
-        midfeat, momentum = 1792, 0.01
-        # Log Mel Spectrogram extractor
-        self.logmel_extractor = T.MelSpectrogram(sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size, win_length=window_size,
-                                                 center=True, pad_mode="reflect", n_mels=mel_bins, f_min=fmin, f_max=fmax)
-        self.bn0 = nn.BatchNorm2d(mel_bins, momentum)
-        self.velocity_model = Mamba2(classes_num, midfeat, momentum)  # OriginalModelHPT2020
-        self.init_weight()
-    def init_weight(self):
-        init_bn(self.bn0)
-    def forward(self, input):
-        """Args: input: (batch_size, data_length)
-        Outputs: output_dict: dict, {'velocity_output': (batch_size, time_steps, classes_num)}
-        """        # batch=12, ch=1, timsteps=10sx100steps/s=1001steps, melbins=229 (old version, torchlibrosa)
-        x = self.logmel_extractor(input)  	# batch=12, melbins=229, timsteps=1001 (new,torchaudio)
-        x = x.unsqueeze(3)                  # batch=12, melbins=229, timsteps=1001, ch=1
-        x = self.bn0(x)					    # batch=12, melbins=229, timsteps=1001, ch=1
-        x = x.transpose(1, 3)				# batch=12, ch=1, timsteps=1001, melbins=229
-        est_velocity = self.velocity_model(x)  	# batch=12, timsteps=1001, classes_num=88
-        output_dict = {'velocity_output': est_velocity}
-        return output_dict
+class Triple_Velo_Mamba(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        sr, fft, fps, feat, cls = cfg.feature.sample_rate, cfg.feature.fft_size, cfg.feature.frames_per_second, cfg.feature.audio_feature, cfg.feature.classes_num
+        self.feature_extractor, self.FRE = get_feature_extractor_and_bins(feat, sr, fft, fps)
+        self.bn0 = nn.BatchNorm2d(self.FRE, 0.01)
+        self.velocity_model = Mamba1(cls, self.FRE, 0.01)
+        # self.velocity_model = Mamba2(cls, self.FRE, 0.01)
+        self.bilstm = nn.LSTM(264, 256, 1, batch_first=True, bidirectional=True)
+        self.velo_fc = nn.Linear(512, cls)
+        init_bn(self.bn0); init_bilstm(self.bilstm); init_layer(self.velo_fc)
+    def forward(self, x1, x2, x3):
+        x = self.bn0(self.feature_extractor(x1).unsqueeze(3)).transpose(1,3)
+        pre = self.velocity_model(x)
+        # --- TypeA ---
+        x = torch.cat((pre, x2, x3), 2)
+        # --- TypeB ---
+        # x = torch.cat((pre, (pre.detach()**0.5)*x2, x3), 2)
+        # --- TypeC ---
+        # x = torch.cat((pre, ((pre.detach()+x2)**0.5)*x2, x3), 2)
+        x,_=self.bilstm(x)
+        return {'velocity_output': torch.sigmoid(self.velo_fc(x))}
+    
 
 ################ HPT Session ################# Block and Module ################
 ################################################################################
 
 class HPTConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, momentum):
-        super(HPTConvBlock, self).__init__()
+        super().__init__()
         self.conv1 = nn.Conv2d(in_channels=in_channels, out_channels=out_channels,
                                kernel_size=3, stride=1, padding=1, bias=False)
         self.conv2 = nn.Conv2d(in_channels=out_channels,out_channels=out_channels,
@@ -250,12 +204,20 @@ class HPTConvBlock(nn.Module):
         return x
 
 class OriginalModelHPT2020(nn.Module):
-    def __init__(self, classes_num, midfeat, momentum):
-        super(OriginalModelHPT2020, self).__init__()
+    def __init__(self, classes_num, input_shape, momentum):
+        super().__init__()
         self.conv_block1 = HPTConvBlock(in_channels=1, out_channels=48, momentum=momentum)
         self.conv_block2 = HPTConvBlock(in_channels=48, out_channels=64, momentum=momentum)
         self.conv_block3 = HPTConvBlock(in_channels=64, out_channels=96, momentum=momentum)
         self.conv_block4 = HPTConvBlock(in_channels=96, out_channels=128, momentum=momentum)
+        # Auto Calculate midfeat
+        with torch.no_grad():
+            dummy = torch.zeros((1, 1, 1000, input_shape))  # 1000个帧，freq维为 input_shape
+            x = self.conv_block1(dummy)
+            x = self.conv_block2(x)
+            x = self.conv_block3(x)
+            x = self.conv_block4(x)
+            midfeat = x.shape[2] * x.shape[3]  # time × freq → flatten(2)
         self.fc5 = nn.Linear(in_features=midfeat, out_features=768, bias=False)
         self.bn5 = nn.BatchNorm1d(768, momentum=momentum)
         self.gru = nn.GRU(input_size=768, hidden_size=256, num_layers=2,
@@ -290,7 +252,7 @@ class OriginalModelHPT2020(nn.Module):
 
 class ModifiedModelHPT2020(nn.Module):
     def __init__(self, classes_num, midfeat, momentum):
-        super(ModifiedModelHPT2020, self).__init__()
+        super().__init__()
         self.conv_block1 = HPTConvBlock(in_channels=1, out_channels=48, momentum=momentum)
         self.conv_block2 = HPTConvBlock(in_channels=48, out_channels=64, momentum=momentum)
         self.conv_block3 = HPTConvBlock(in_channels=64, out_channels=96, momentum=momentum)
@@ -327,76 +289,50 @@ class ModifiedModelHPT2020(nn.Module):
         output = torch.sigmoid(self.fc(x))
         return output
 
-################ HPT Session ################# Single #########################
-###############################################################################
 
 class Single_Velocity_HPT(nn.Module):
-    def __init__(self, frames_per_second, classes_num):
-        super(Single_Velocity_HPT, self).__init__()
-        sample_rate, window_size, mel_bins, fmin = 16000, 2048, 229, 30
-        fmax, hop_size = sample_rate//2, sample_rate//frames_per_second # 16000Hz/100fps = 160steps/s
-        midfeat, momentum = 1792, 0.01
-        # Log Mel Spectrogram extractor
-        self.logmel_extractor = T.MelSpectrogram(sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size, win_length=window_size,
-                                                 center=True, pad_mode="reflect", n_mels=mel_bins, f_min=fmin, f_max=fmax)
-        self.bn0 = nn.BatchNorm2d(mel_bins, momentum)
-        self.velocity_model = OriginalModelHPT2020(classes_num, midfeat, momentum)  # OriginalModelHPT2020
+    def __init__(self, cfg):
+        super().__init__()
+        sample_rate         = cfg.feature.sample_rate
+        fft_size            = cfg.feature.fft_size
+        frames_per_second   = cfg.feature.frames_per_second
+        audio_feature       = cfg.feature.audio_feature
+        classes_num         = cfg.feature.classes_num
+        momentum            = 0.01
+        self.feature_extractor, self.FRE = get_feature_extractor_and_bins(audio_feature, sample_rate, fft_size, frames_per_second)
+        # midfeat = 1792
+        self.bn0 = nn.BatchNorm2d(self.FRE, momentum)
+        self.velocity_model = OriginalModelHPT2020(classes_num, self.FRE , momentum)  # OriginalModelHPT2020
+        # self.velocity_model = OriginalModelHPT2020(classes_num, midfeat, momentum)  # OriginalModelHPT2020
         self.init_weight()
     def init_weight(self):
         init_bn(self.bn0)
     def forward(self, input):
-        """Args: input: (batch_size, data_length)
+        """
+        Args: input: (batch_size, data_length)
         Outputs: output_dict: dict, {'velocity_output': (batch_size, time_steps, classes_num)}
-        """        # batch=12, ch=1, timsteps=10sx100steps/s=1001steps, melbins=229 (old version, torchlibrosa)
-        x = self.logmel_extractor(input)  	# batch=12, melbins=229, timsteps=1001 (new,torchaudio)
-        x = x.unsqueeze(3)                  # batch=12, melbins=229, timsteps=1001, ch=1
-        x = self.bn0(x)					    # batch=12, melbins=229, timsteps=1001, ch=1
-        x = x.transpose(1, 3)				# batch=12, ch=1, timsteps=1001, melbins=229
+        """
+        x = self.feature_extractor(input)    	# batch=12, melbins=229, timsteps=1001 (new,torchaudio)
+        x = x.unsqueeze(3)                      # batch=12, melbins=229, timsteps=1001, ch=1
+        x = self.bn0(x)					        # batch=12, melbins=229, timsteps=1001, ch=1
+        x = x.transpose(1, 3)			    	# batch=12, ch=1, timsteps=1001, melbins=229
         est_velocity = self.velocity_model(x)  	# batch=12, timsteps=1001, classes_num=88
         output_dict = {'velocity_output': est_velocity}
         return output_dict
-
-
-class Single_Velocity_HPT2(nn.Module):
-    def __init__(self, frames_per_second, classes_num):
-        super(Single_Velocity_HPT2, self).__init__()
-        sample_rate, window_size, mel_bins, fmin = 16000, 2048, 229, 30
-        fmax, hop_size = sample_rate//2, sample_rate//frames_per_second # 16000Hz/100fps = 160steps/s
-        midfeat, momentum = 1792, 0.01
-        # Log Mel Spectrogram extractor
-        self.logmel_extractor = T.MelSpectrogram(sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size, win_length=window_size,
-                                                 center=True, pad_mode="reflect", n_mels=mel_bins, f_min=fmin, f_max=fmax)
-        self.bn0 = nn.BatchNorm2d(mel_bins, momentum)
-        self.velocity_model = ModifiedModelHPT2020(classes_num, midfeat, momentum)  # OriginalModelHPT2020
-        self.init_weight()
-    def init_weight(self):
-        init_bn(self.bn0)
-    def forward(self, input):
-        """Args: input: (batch_size, data_length)
-        Outputs: output_dict: dict, {'velocity_output': (batch_size, time_steps, classes_num)}
-        """        # batch=12, ch=1, timsteps=10sx100steps/s=1001steps, melbins=229 (old version, torchlibrosa)
-        x = self.logmel_extractor(input)  	# batch=12, melbins=229, timsteps=1001 (new,torchaudio)
-        x = x.unsqueeze(3)                  # batch=12, melbins=229, timsteps=1001, ch=1
-        x = self.bn0(x)					    # batch=12, melbins=229, timsteps=1001, ch=1
-        x = x.transpose(1, 3)				# batch=12, ch=1, timsteps=1001, melbins=229
-        est_velocity = self.velocity_model(x)  	# batch=12, timsteps=1001, classes_num=88
-        output_dict = {'velocity_output': est_velocity}
-        return output_dict
-
-################ HPT Session ################# Dual input2 #####################
-################ HPT Session ################# Dual input2 #####################
 
 class Dual_Velocity_HPT(nn.Module):
-    def __init__(self, frames_per_second, classes_num):
-        super(Dual_Velocity_HPT, self).__init__()
-        sample_rate, window_size, mel_bins, fmin = 16000, 2048, 229, 30
-        fmax, hop_size = sample_rate//2, sample_rate//frames_per_second # 16000Hz/100fps = 160steps/s
-        midfeat, momentum = 1792, 0.01
-        self.logmel_extractor = T.MelSpectrogram(sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size, win_length=window_size,
-                                                 center=True, pad_mode="reflect", n_mels=mel_bins, f_min=fmin, f_max=fmax)
-        self.bn0 = nn.BatchNorm2d(mel_bins, momentum)
-        self.velocity_model = OriginalModelHPT2020(classes_num, midfeat, momentum)  # OriginalModelHPT2020
-        self.bilstm = nn.LSTM(input_size=88 * 2, hidden_size=256, num_layers=1, bias=True, batch_first=True, dropout=0., bidirectional=True)
+    def __init__(self, cfg):
+        super().__init__()
+        sample_rate         = cfg.feature.sample_rate
+        fft_size            = cfg.feature.fft_size
+        frames_per_second   = cfg.feature.frames_per_second
+        audio_feature       = cfg.feature.audio_feature
+        classes_num         = cfg.feature.classes_num
+        momentum            = 0.01
+        self.feature_extractor, self.FRE = get_feature_extractor_and_bins(audio_feature, sample_rate, fft_size, frames_per_second)
+        self.bn0 = nn.BatchNorm2d(self.FRE, momentum)
+        self.velocity_model = OriginalModelHPT2020(classes_num, self.FRE, momentum)
+        self.bilstm = nn.LSTM(input_size=88*2, hidden_size=256, num_layers=1, bias=True, batch_first=True, dropout=0., bidirectional=True)
         self.velo_fc = nn.Linear(512, classes_num, bias=True)
         self.init_weight()
     def init_weight(self):
@@ -404,107 +340,53 @@ class Dual_Velocity_HPT(nn.Module):
         init_bilstm(self.bilstm)
         init_layer(self.velo_fc)
     def forward(self, input1, input2):
-        """Args: input1: (batch_size, data_length)
-                 input2: (batch_size, time_steps, classes_num)
-        Outputs: output_dict: dict, {'velocity_output': (batch_size, time_steps, classes_num)}
-        """        # batch=12, ch=1, timsteps=10sx100steps/s=1001steps, melbins=229 (old version, torchlibrosa)
-        x1 = self.logmel_extractor(input1)  		# batch=12, melbins=229, timsteps=1001 (new,torchaudio)
-        x1 = x1.unsqueeze(3)			        	# batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = self.bn0(x1)			            	# batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = x1.transpose(1, 3)			    	    # batch=12, ch=1, timsteps=1001, melbins=229
-        pre_velocity = self.velocity_model(x1) 	    # batch_size=12, time_steps=1001, classes_num=88
-        # Use direct-in, or use onset (regression) to condition velocities
+        """
+        Args:
+            input1: (batch_size, data_length) — 音频波形
+            input2: (batch_size, time_steps, classes_num) — 辅助输入 (e.g., onset)
+        Returns:
+            {'velocity_output': (batch_size, time_steps, classes_num)}
+        ---- 可选三种融合方式 ----
+        TypeA: 直接拼接
+            x = torch.cat((pre_velocity, input2), dim=2)
+        TypeB: 带平方根加权（轻度依赖 pre_velocity）
+            x = torch.cat((pre_velocity, (pre_velocity.detach() ** 0.5) * input2), dim=2)
+        TypeC: 混合加权（适中依赖 pre_velocity + input2）
+            x = torch.cat((pre_velocity, ((pre_velocity.detach() + input2) ** 0.5) * input2), dim=2)
+        """
+        # ====== 特征提取 ======
+        x_feat = self.feature_extractor(input1)       # (B, Freq, T)
+        x_feat = x_feat.unsqueeze(3)                  # (B, Freq, T, 1)
+        x_feat = self.bn0(x_feat)
+        x_feat = x_feat.transpose(1, 3)               # (B, 1, T, Freq)
+        # ====== 预测初始 velocity ======
+        pre_velocity = self.velocity_model(x_feat)    # (B, T, 88)
+        # ====== 融合策略 (选其一) ======
+        # --- TypeA ---
         x = torch.cat((pre_velocity, input2), dim=2)
-        (x, _) = self.bilstm(x)			            
-        # x = F.dropout(x, p=0.5, training=self.training) # NEW
+        # --- TypeB ---
+        # x = torch.cat((pre_velocity, (pre_velocity.detach() ** 0.5) * input2), dim=2)
+        # --- TypeC ---
+        # x = torch.cat((pre_velocity, ((pre_velocity.detach() + input2) ** 0.5) * input2), dim=2)
+        # ====== 双向LSTM + 输出层 ======
+        (x, _) = self.bilstm(x)
+        # x = F.dropout(x, p=0.5, training=self.training)  # optional
         upd_velocity = torch.sigmoid(self.velo_fc(x))
-        output_dict = {'velocity_output': upd_velocity}
-        return output_dict
+        return {'velocity_output': upd_velocity}
 
-
-class Dual_Velocity_HPT_B(nn.Module):
-    def __init__(self, frames_per_second, classes_num):
-        super(Dual_Velocity_HPT_B, self).__init__()
-        sample_rate, window_size, mel_bins, fmin = 16000, 2048, 229, 30
-        fmax, hop_size = sample_rate // 2, sample_rate // frames_per_second  # 16000Hz/100fps = 160steps/s
-        midfeat, momentum = 1792, 0.01
-        # Log Mel Spectrogram extractor
-        self.logmel_extractor = T.MelSpectrogram(sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size, win_length=window_size,
-                                                 center=True, pad_mode="reflect", n_mels=mel_bins, f_min=fmin, f_max=fmax)
-        self.bn0 = nn.BatchNorm2d(mel_bins, momentum)
-        self.velocity_model = OriginalModelHPT2020(classes_num, midfeat, momentum)  # OriginalModelHPT2020
-        self.bilstm = nn.LSTM(input_size=88 * 2, hidden_size=256, num_layers=1, bias=True, batch_first=True, dropout=0., bidirectional=True)
-        self.velo_fc = nn.Linear(512, classes_num, bias=True)
-        self.init_weight()
-    def init_weight(self):
-        init_bn(self.bn0)
-        init_bilstm(self.bilstm)
-        init_layer(self.velo_fc)
-    def forward(self, input1, input2):
-        """Args: input1: (batch_size, data_length)
-                 input2: (batch_size, time_steps, classes_num)
-        Outputs: output_dict: dict, {'velocity_output': (batch_size, time_steps, classes_num)}"""
-        # batch=12, ch=1, timsteps=10sx100steps/s=1001steps, melbins=229 (old version, torchlibrosa)
-        x1 = self.logmel_extractor(input1)      # batch=12, melbins=229, timsteps=1001 (new,torchaudio)
-        x1 = x1.unsqueeze(3)                    # batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = self.bn0(x1)                       # batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = x1.transpose(1, 3)                 # batch=12, ch=1, timsteps=1001, melbins=229
-        pre_velocity = self.velocity_model(x1)  # batch_size=12, time_steps=1001, classes_num=88
-        x = torch.cat((pre_velocity, (pre_velocity.detach() ** 0.5) * input2), dim=2)
-        (x, _) = self.bilstm(x)                 # x = F.dropout(x, p=0.5, training=self.training)
-        upd_velocity = torch.sigmoid(self.velo_fc(x))
-        output_dict = {'velocity_output': upd_velocity}
-        return output_dict
-
-class Dual_Velocity_HPT_C(nn.Module):
-    def __init__(self, frames_per_second, classes_num):
-        super(Dual_Velocity_HPT_C, self).__init__()
-        sample_rate, window_size, mel_bins, fmin = 16000, 2048, 229, 30
-        fmax, hop_size = sample_rate // 2, sample_rate // frames_per_second  # 16000Hz/100fps = 160steps/s
-        midfeat, momentum = 1792, 0.01
-        # Log Mel Spectrogram extractor
-        self.logmel_extractor = T.MelSpectrogram(sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size, win_length=window_size,
-                                                 center=True, pad_mode="reflect", n_mels=mel_bins, f_min=fmin, f_max=fmax)
-        self.bn0 = nn.BatchNorm2d(mel_bins, momentum)
-        self.velocity_model = OriginalModelHPT2020(classes_num, midfeat, momentum)  # OriginalModelHPT2020
-        self.bilstm = nn.LSTM(input_size=88 * 2, hidden_size=256, num_layers=1, bias=True, batch_first=True, dropout=0., bidirectional=True)
-        self.velo_fc = nn.Linear(512, classes_num, bias=True)
-        self.init_weight()
-    def init_weight(self):
-        init_bn(self.bn0)
-        init_bilstm(self.bilstm)
-        init_layer(self.velo_fc)
-    def forward(self, input1, input2):
-        """Args: input1: (batch_size, data_length)
-                 input2: (batch_size, time_steps, classes_num)
-        Outputs: output_dict: dict, {'velocity_output': (batch_size, time_steps, classes_num)}
-        """  # batch=12, ch=1, timsteps=10sx100steps/s=1001steps, melbins=229 (old version, torchlibrosa)
-        x1 = self.logmel_extractor(input1)      # batch=12, melbins=229, timsteps=1001 (new,torchaudio)
-        x1 = x1.unsqueeze(3)                    # batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = self.bn0(x1)                       # batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = x1.transpose(1, 3)                 # batch=12, ch=1, timsteps=1001, melbins=229
-        pre_velocity = self.velocity_model(x1)  # batch_size=8, time_steps=1001, classes_num=88
-        x = torch.cat((pre_velocity, ((pre_velocity.detach()+input2) ** 0.5) * input2), dim=2) # TypeC
-        (x, _) = self.bilstm(x)                 # x = F.dropout(x, p=0.5, training=self.training)
-        upd_velocity = torch.sigmoid(self.velo_fc(x))
-        output_dict = {'velocity_output': upd_velocity}
-        return output_dict
-
-################ HPT Session ################# Triple input2 input3 #################
-################ HPT Session ################# Triple input2 input3 #################
-################ HPT Session ################# Triple input2 input3 #################
 
 class Triple_Velocity_HPT(nn.Module):
-    def __init__(self, frames_per_second, classes_num):
-        super(Triple_Velocity_HPT, self).__init__()
-        sample_rate, window_size, mel_bins, fmin = 16000, 2048, 229, 30
-        fmax, hop_size = sample_rate // 2, sample_rate // frames_per_second  # 16000Hz/100fps = 160steps/s
-        midfeat_onf, momentum = 1792, 0.01
-        # Log Mel Spectrogram extractor
-        self.logmel_extractor = T.MelSpectrogram(sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size, win_length=window_size,
-                                                 center=True, pad_mode="reflect", n_mels=mel_bins, f_min=fmin, f_max=fmax)
-        self.bn0 = nn.BatchNorm2d(mel_bins, momentum)
-        self.velocity_model = OriginalModelHPT2020(classes_num, midfeat_onf, momentum)
+    def __init__(self, cfg):
+        super().__init__()
+        sample_rate         = cfg.feature.sample_rate           # 16000
+        fft_size            = cfg.feature.fft_size              # 2048
+        frames_per_second   = cfg.feature.frames_per_second     # 100
+        audio_feature       = cfg.feature.audio_feature
+        classes_num         = cfg.feature.classes_num
+        momentum            = 0.01
+        self.feature_extractor, self.FRE = get_feature_extractor_and_bins(audio_feature, sample_rate, fft_size, frames_per_second)
+        self.bn0 = nn.BatchNorm2d(self.FRE, momentum)
+        self.velocity_model = OriginalModelHPT2020(classes_num, self.FRE, momentum)
         self.bilstm = nn.LSTM(input_size=88 * 3, hidden_size=256, num_layers=1, bias=True, batch_first=True, dropout=0., bidirectional=True)
         self.velo_fc = nn.Linear(512, classes_num, bias=True)
         self.init_weight()
@@ -513,89 +395,39 @@ class Triple_Velocity_HPT(nn.Module):
         init_bilstm(self.bilstm)
         init_layer(self.velo_fc)
     def forward(self, input1, input2, input3):
-        """Args: input1: (batch_size, data_length)
-                 input2:(batch_size, time_steps, classes_num)
-                 input3:(batch_size, time_steps, classes_num)
-        Outputs: output_dict: dict, {'velocity_output': (batch_size, time_steps, classes_num)}"""
-        x1 = self.logmel_extractor(input1)      # batch=12, melbins=229, timsteps=1001 (new,torchaudio)
-        x1 = x1.unsqueeze(3)                    # batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = self.bn0(x1)                       # batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = x1.transpose(1, 3)                 # batch=12, ch=1, timsteps=1001, melbins=229
-        pre_velocity = self.velocity_model(x1)  # batch_size, time_steps, classes_num
-        x = torch.cat((pre_velocity, input2, input3), dim=2)
+        """
+        Args:
+            input1: (batch_size, data_length) — 音频波形
+            input2: (batch_size, time_steps, classes_num) — 辅助输入1 (e.g., onset)
+            input3: (batch_size, time_steps, classes_num) — 辅助输入2 (e.g., frame)
+        Returns:
+            {'velocity_output': (batch_size, time_steps, classes_num)}
+        ---- 可选三种融合方式 ----
+        TypeA: 直接拼接
+            x = torch.cat((pre_velocity, input2, input3), dim=2)
+        TypeB: 带平方根加权（轻度依赖 pre_velocity）
+            x = torch.cat((pre_velocity, (pre_velocity.detach() ** 0.5) * input2, input3), dim=2)
+        TypeC: 混合加权（适中依赖 pre_velocity + input2）
+            x = torch.cat((pre_velocity, ((pre_velocity.detach() + input2) ** 0.5) * input2, input3), dim=2)
+        """
+        # ===== 特征提取 =====
+        x_feat = self.feature_extractor(input1)   # batch, FRE, T
+        x_feat = x_feat.unsqueeze(3)              # batch, FRE, T, 1
+        x_feat = self.bn0(x_feat)
+        x_feat = x_feat.transpose(1, 3)           # batch, 1, T, FRE
+        # ===== 预测初始 velocity =====
+        pre_velocity = self.velocity_model(x_feat)  # batch, T, 88
+        # ===== 融合策略 (选其一) =====
+        # --- TypeA ---
+        x = torch.cat((pre_velocity, input2, input3), dim=2) 
+        # --- TypeB ---
+        # x = torch.cat((pre_velocity, (pre_velocity.detach() ** 0.5) * input2, input3), dim=2)
+        # --- TypeC ---
+        # x = torch.cat((pre_velocity, ((pre_velocity.detach() + input2) ** 0.5) * input2, input3), dim=2)
+        # ===== 后续LSTM + FC =====
         (x, _) = self.bilstm(x)
-        # x = F.dropout(x, p=0.5, training=self.training) # NEW 
         upd_velocity = torch.sigmoid(self.velo_fc(x))
-        output_dict = {'velocity_output': upd_velocity}
-        return output_dict
-
-
-class Triple_Velocity_HPT_B(nn.Module):
-    def __init__(self, frames_per_second, classes_num):
-        super(Triple_Velocity_HPT_B, self).__init__()
-        sample_rate, window_size, mel_bins, fmin = 16000, 2048, 229, 30
-        fmax, hop_size = sample_rate // 2, sample_rate // frames_per_second  # 16000Hz/100fps = 160steps/s
-        midfeat_onf, momentum = 1792, 0.01
-        self.logmel_extractor = T.MelSpectrogram(sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size,
-                                                 win_length=window_size, center=True, pad_mode="reflect", n_mels=mel_bins, f_min=fmin, f_max=fmax)
-        self.bn0 = nn.BatchNorm2d(mel_bins, momentum)
-        self.velocity_model = OriginalModelHPT2020(classes_num, midfeat_onf, momentum)
-        self.bilstm = nn.LSTM(input_size=88 * 3, hidden_size=256, num_layers=1, bias=True, batch_first=True, dropout=0., bidirectional=True)
-        self.velo_fc = nn.Linear(512, classes_num, bias=True)
-        self.init_weight()
-    def init_weight(self):
-        init_bn(self.bn0)
-        init_bilstm(self.bilstm)
-        init_layer(self.velo_fc)
-    def forward(self, input1, input2, input3):
-        """Args: input1: (batch_size, data_length)
-                 input2:(batch_size, time_steps, classes_num)
-                 input3:(batch_size, time_steps, classes_num)
-        Outputs: output_dict: dict, {'velocity_output': (batch_size, time_steps, classes_num)}"""
-        x1 = self.logmel_extractor(input1)      # batch=12, melbins=229, timsteps=1001 (new,torchaudio)
-        x1 = x1.unsqueeze(3)                    # batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = self.bn0(x1)                       # batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = x1.transpose(1,3)                  # batch=12, ch=1, timsteps=1001, melbins=229
-        pre_velocity = self.velocity_model(x1)  # batch_size, time_steps, classes_num
-        x = torch.cat((pre_velocity, (pre_velocity.detach()**0.5)*input2, input3), dim=2)
-        (x, _) = self.bilstm(x)                 # x = F.dropout(x, p=0.5, training=self.training)
-        upd_velocity = torch.sigmoid(self.velo_fc(x))
-        output_dict = {'velocity_output': upd_velocity}
-        return output_dict
-
-
-class Triple_Velocity_HPT_C(nn.Module):
-    def __init__(self, frames_per_second, classes_num):
-        super(Triple_Velocity_HPT_C, self).__init__()
-        sample_rate, window_size, mel_bins, fmin = 16000, 2048, 229, 30
-        fmax, hop_size = sample_rate // 2, sample_rate // frames_per_second  # 16000Hz/100fps = 160steps/s
-        midfeat_onf, momentum = 1792, 0.01
-        self.logmel_extractor = T.MelSpectrogram(sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size,
-                                                 win_length=window_size, center=True, pad_mode="reflect", n_mels=mel_bins, f_min=fmin, f_max=fmax)
-        self.bn0 = nn.BatchNorm2d(mel_bins, momentum)
-        self.velocity_model = OriginalModelHPT2020(classes_num, midfeat_onf, momentum)
-        self.bilstm = nn.LSTM(input_size=88 * 3, hidden_size=256, num_layers=1, bias=True, batch_first=True, dropout=0., bidirectional=True)
-        self.velo_fc = nn.Linear(512, classes_num, bias=True)
-        self.init_weight()
-    def init_weight(self):
-        init_bn(self.bn0)
-        init_bilstm(self.bilstm)
-        init_layer(self.velo_fc)
-    def forward(self, input1, input2, input3):
-        """Args: input1: (batch_size, data_length)
-                 input2:(batch_size, time_steps, classes_num)
-                 input3:(batch_size, time_steps, classes_num)
-        Outputs: output_dict: dict, {'velocity_output': (batch_size, time_steps, classes_num)}"""
-        x1 = self.logmel_extractor(input1)      # batch=12, melbins=229, timsteps=1001 (new,torchaudio)
-        x1 = x1.unsqueeze(3)                    # batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = self.bn0(x1)                       # batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = x1.transpose(1,3)                  # batch=12, ch=1, timsteps=1001, melbins=229
-        pre_velocity = self.velocity_model(x1)  # batch_size, time_steps, classes_num
-        x = torch.cat((pre_velocity, ((pre_velocity.detach()+input2) ** 0.5) * input2, input3), dim=2)
-        (x, _) = self.bilstm(x)                 # x = F.dropout(x, p=0.5, training=self.training)
-        upd_velocity = torch.sigmoid(self.velo_fc(x))
-        output_dict = {'velocity_output': upd_velocity}
-        return output_dict
+        return {'velocity_output': upd_velocity}
 
 
 ################ ONF Session ################# Block and Module ###############
@@ -603,9 +435,8 @@ class Triple_Velocity_HPT_C(nn.Module):
 
 class ONFConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, momentum):
-        super(ONFConvBlock, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels=in_channels, out_channels=out_channels,
-                               kernel_size=3, stride=1, padding=1, bias=False)
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(out_channels, momentum)
         self.init_weight()
     def init_weight(self):
@@ -621,12 +452,16 @@ class ONFConvBlock(nn.Module):
 
 
 class OriginalModelONF2018(nn.Module):
-    def __init__(self, classes_num, midfeat_onf, momentum):
-        super(OriginalModelONF2018, self).__init__()
-        self.conv_block1 = ONFConvBlock(in_channels=1, out_channels=48, momentum=momentum)
-        self.conv_block2 = ONFConvBlock(in_channels=48, out_channels=48, momentum=momentum)
-        self.conv_block3 = ONFConvBlock(in_channels=48, out_channels=96, momentum=momentum)
-        self.fc4 = nn.Linear(midfeat_onf, 768, bias=False)
+    def __init__(self, classes_num, input_shape, momentum):
+        super().__init__()
+        self.conv1 = ONFConvBlock(1, 48, momentum)
+        self.conv2 = ONFConvBlock(48, 48, momentum)
+        self.conv3 = ONFConvBlock(48, 96, momentum)
+        with torch.no_grad():
+            dummy = torch.zeros((1, 1, 1000, input_shape))
+            x = self.conv3(self.conv2(self.conv1(dummy)), pool_type='max')
+            midfeat = x.shape[2] * x.shape[3] * x.shape[1]
+        self.fc4 = nn.Linear(midfeat, 768, bias=False)
         self.bn4 = nn.BatchNorm1d(768, momentum=momentum)
         self.fc = nn.Linear(768, classes_num, bias=True)
         self.init_weight()
@@ -634,394 +469,89 @@ class OriginalModelONF2018(nn.Module):
         init_layer(self.fc4)
         init_bn(self.bn4)
         init_layer(self.fc)
-    def forward(self, input):
-        """Args: input: (batch_size, channels_num, time_steps, freq_bins)
-        Outputs: output: (batch_size, time_steps, classes_num)"""							
-        # input batch=8, chn=1,  timstep=1001, melbins=229
-        x = self.conv_block1(input)		# conv1 batch=8, chn=48, timstep=1001, melbins=229
-        # x = F.dropout(x, p=0.2, training=self.training)
-        x = self.conv_block2(x, pool_type='max')		# conv2 batch=8, chn=48, timstep=1001, melbins=114	
-        x = self.conv_block3(x, pool_type='max')		# conv3 batch=8, chn=96, timstep=1001, melbins=57
-        x = x.transpose(1, 2).flatten(2)			# 8,96,1001,57--trans--8,1001,96,57--flat--8,1001,5472
-        x = F.relu(self.bn4(self.fc4(x).transpose(1, 2)).transpose(1, 2))
-        # x = F.dropout(x, p=0.5, training=self.training)
-        output = torch.sigmoid(self.fc(x))
-        return output
-
-
-class ModifiedModelONF2018(nn.Module):
-    def __init__(self, classes_num, midfeat_onf, momentum):
-        super(ModifiedModelONF2018, self).__init__()
-        self.conv_block1 = ONFConvBlock(in_channels=1, out_channels=48, momentum=momentum)
-        self.conv_block2 = ONFConvBlock(in_channels=48, out_channels=48, momentum=momentum)
-        self.conv_block3 = ONFConvBlock(in_channels=48, out_channels=96, momentum=momentum)
-        self.fc4 = nn.Linear(midfeat_onf, 768, bias=False)
-        self.bn4 = nn.BatchNorm1d(768, momentum=momentum)
-        self.bilstm = nn.LSTM(input_size=768, hidden_size=256, num_layers=1,  # num_layers = 2
-                              bias=True, batch_first=True, dropout=0., bidirectional=True)
-        self.fc = nn.Linear(512, classes_num, bias=True)
-        self.init_weight()
-    def init_weight(self):
-        init_layer(self.fc4)
-        init_bn(self.bn4)
-        init_bilstm(self.bilstm)
-        init_layer(self.fc)
-    def forward(self, input):
-        """Args: input: (batch_size, channels_num, time_steps, freq_bins)
-        Outputs: output: (batch_size, time_steps, classes_num)
-        Selection: x = F.dropout(x, p=0.2 or 0.5, training=self.training)"""	
-        x = self.conv_block1(input)
-        x = self.conv_block2(x, pool_type='max')
-        x = self.conv_block3(x, pool_type='max')
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.conv2(x, 'max')
+        x = self.conv3(x, 'max')
         x = x.transpose(1, 2).flatten(2)
         x = F.relu(self.bn4(self.fc4(x).transpose(1, 2)).transpose(1, 2))
-        (x, _) = self.bilstm(x)
-        output = torch.sigmoid(self.fc(x))
-        return output
+        return torch.sigmoid(self.fc(x))
 
-################ ONF Session ################# Single ###############
-#####################################################################
 
 class Single_Velocity_ONF(nn.Module):
-    def __init__(self, frames_per_second, classes_num):
-        super(Single_Velocity_ONF, self).__init__()
-        sample_rate, window_size, mel_bins, fmin = 16000, 2048, 229, 30
-        fmax, hop_size = sample_rate//2, sample_rate//frames_per_second # 16000Hz/100fps = 160steps/s
-        midfeat_onf, momentum = 5472, 0.01
-        # Log Mel Spectrogram extractor
-        self.logmel_extractor = T.MelSpectrogram(sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size, win_length=window_size,
-                                                 center=True, pad_mode="reflect", n_mels=mel_bins, f_min=fmin, f_max=fmax)
-        self.bn0 = nn.BatchNorm2d(mel_bins, momentum)
-        self.velocity_model = OriginalModelONF2018(classes_num, midfeat_onf, momentum)  # OriginalModelHPT2020
+    def __init__(self, cfg):
+        super().__init__()
+        sr, fft, fps, feat, cls = (
+            cfg.feature.sample_rate,
+            cfg.feature.fft_size,
+            cfg.feature.frames_per_second,
+            cfg.feature.audio_feature,
+            cfg.feature.classes_num)
+        self.feature_extractor, self.FRE = get_feature_extractor_and_bins(feat, sr, fft, fps)
+        self.bn0 = nn.BatchNorm2d(self.FRE, 0.01)
+        self.velocity_model = OriginalModelONF2018(cls, self.FRE, 0.01)
         self.init_weight()
-    def init_weight(self):
-        init_bn(self.bn0)
+    def init_weight(self): init_bn(self.bn0)
     def forward(self, input):
-        """Args: input: (batch_size, data_length)
-        Outputs: output_dict: dict, {'velocity_output': (batch_size, time_steps, classes_num)}"""        
-        # batch=12, ch=1, timsteps=10sx100steps/s=1001steps, melbins=229 (old version, torchlibrosa)
-        x = self.logmel_extractor(input)  		# batch=12, melbins=229, timsteps=1001 (new,torchaudio)
-        x = x.unsqueeze(3)				# batch=12, melbins=229, timsteps=1001, ch=1
-        x = self.bn0(x)					# batch=12, melbins=229, timsteps=1001, ch=1
-        x = x.transpose(1, 3)				# batch=12, ch=1, timsteps=1001, melbins=229
-        est_velocity = self.velocity_model(x) 	# batch_size, time_steps, classes_num
-        output_dict = {'velocity_output': est_velocity}
-        return output_dict
-
-
-class Single_Velocity_ONF2(nn.Module):
-    def __init__(self, frames_per_second, classes_num):
-        super(Single_Velocity_ONF2, self).__init__()
-        sample_rate, window_size, mel_bins, fmin = 16000, 2048, 229, 30
-        fmax, hop_size = sample_rate//2, sample_rate//frames_per_second # 16000Hz/100fps = 160steps/s
-        midfeat_onf, momentum = 5472, 0.01
-        # Log Mel Spectrogram extractor
-        self.logmel_extractor = T.MelSpectrogram(sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size, win_length=window_size,
-                                                 center=True, pad_mode="reflect", n_mels=mel_bins, f_min=fmin, f_max=fmax)
-        self.bn0 = nn.BatchNorm2d(mel_bins, momentum)
-        self.velocity_model = ModifiedModelONF2018(classes_num, midfeat_onf, momentum)  # OriginalModelHPT2020
-        self.init_weight()
-    def init_weight(self):
-        init_bn(self.bn0)
-    def forward(self, input):
-        """Args: input: (batch_size, data_length)
-        Outputs: output_dict: dict, {'velocity_output': (batch_size, time_steps, classes_num)}"""        
-        # batch=12, ch=1, timsteps=10sx100steps/s=1001steps, melbins=229 (old version, torchlibrosa)
-        x = self.logmel_extractor(input)  		# batch=12, melbins=229, timsteps=1001 (new,torchaudio)
-        x = x.unsqueeze(3)				# batch=12, melbins=229, timsteps=1001, ch=1
-        x = self.bn0(x)					# batch=12, melbins=229, timsteps=1001, ch=1
-        x = x.transpose(1, 3)				# batch=12, ch=1, timsteps=1001, melbins=229
-        est_velocity = self.velocity_model(x) 	# batch_size, time_steps, classes_num
-        output_dict = {'velocity_output': est_velocity}
-        return output_dict
-
-
-################ ONF Session ################# Dual input2 ###############
-################ ONF Session ################# Dual input2 ###############
+        x = self.bn0(self.feature_extractor(input).unsqueeze(3)).transpose(1, 3)
+        return {'velocity_output': self.velocity_model(x)}
 
 
 class Dual_Velocity_ONF(nn.Module):
-    def __init__(self, frames_per_second, classes_num):
-        super(Dual_Velocity_ONF, self).__init__()
-        sample_rate, window_size, mel_bins, fmin = 16000, 2048, 229, 30
-        fmax, hop_size = sample_rate//2, sample_rate//frames_per_second # 16000Hz/100fps = 160steps/s
-        midfeat_onf, momentum = 5472, 0.01
-        # Log Mel Spectrogram extractor
-        self.logmel_extractor = T.MelSpectrogram(sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size, win_length=window_size, center=True, pad_mode="reflect", n_mels=mel_bins, f_min=fmin, f_max=fmax)
-        self.bn0 = nn.BatchNorm2d(mel_bins, momentum)
-        self.velocity_model = OriginalModelONF2018(classes_num, midfeat_onf, momentum)
-        self.bilstm = nn.LSTM(input_size=88 * 2, hidden_size=256, num_layers=1, bias=True, batch_first=True, dropout=0., bidirectional=True)
-        self.velo_fc = nn.Linear(512, classes_num, bias=True)
+    def __init__(self, cfg):
+        super().__init__()
+        sr, fft, fps, feat, cls = (
+            cfg.feature.sample_rate,
+            cfg.feature.fft_size,
+            cfg.feature.frames_per_second,
+            cfg.feature.audio_feature,
+            cfg.feature.classes_num)
+        self.feature_extractor, self.FRE = get_feature_extractor_and_bins(feat, sr, fft, fps)
+        self.bn0 = nn.BatchNorm2d(self.FRE, 0.01)
+        self.velocity_model = OriginalModelONF2018(cls, self.FRE, 0.01)
+        self.bilstm = nn.LSTM(88 * 2, 256, 1, batch_first=True, bidirectional=True)
+        self.velo_fc = nn.Linear(512, cls, bias=True)
         self.init_weight()
     def init_weight(self):
         init_bn(self.bn0)
         init_bilstm(self.bilstm)
         init_layer(self.velo_fc)
     def forward(self, input1, input2):
-        """Args: input1: (batch_size, data_length)
-                 input2:(batch_size, time_steps, classes_num)
-        Outputs: output_dict: dict, {'velocity_output': (batch_size, time_steps, classes_num)}"""
-        x1 = self.logmel_extractor(input1)  		# batch=12, melbins=229, timsteps=1001 (new,torchaudio)
-        x1 = x1.unsqueeze(3)				# batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = self.bn0(x1)				# batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = x1.transpose(1, 3)				# batch=12, ch=1, timsteps=1001, melbins=229
-        pre_velocity = self.velocity_model(x1)  	# batch_size, time_steps, classes_num
-        # Use velocities to condition onset regression, maybe input2.detach() is necessary
-        x = torch.cat((pre_velocity, input2), dim=2)
-        (x, _) = self.bilstm(x)			# x = F.dropout(x, p=0.5, training=self.training)
-        upd_velocity = torch.sigmoid(self.velo_fc(x))
-        output_dict = {'velocity_output': upd_velocity}
-        return output_dict
-
-
-class Dual_Velocity_ONF_B(nn.Module):
-    def __init__(self, frames_per_second, classes_num):
-        super(Dual_Velocity_ONF_B, self).__init__()
-        sample_rate, window_size, mel_bins, fmin = 16000, 2048, 229, 30
-        fmax, hop_size = sample_rate // 2, sample_rate // frames_per_second  # 16000Hz/100fps = 160steps/s
-        midfeat_onf, momentum = 5472, 0.01
-        self.logmel_extractor = T.MelSpectrogram(sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size, win_length=window_size,
-                                                 center=True, pad_mode="reflect", n_mels=mel_bins, f_min=fmin, f_max=fmax)
-        self.bn0 = nn.BatchNorm2d(mel_bins, momentum)
-        self.velocity_model = OriginalModelONF2018(classes_num, midfeat_onf, momentum)
-        self.bilstm = nn.LSTM(input_size=88 * 2, hidden_size=256, num_layers=1, bias=True, batch_first=True, dropout=0., bidirectional=True)
-        self.velo_fc = nn.Linear(512, classes_num, bias=True)
-        self.init_weight()
-    def init_weight(self):
-        init_bn(self.bn0)
-        init_bilstm(self.bilstm)
-        init_layer(self.velo_fc)
-    def forward(self, input1, input2):      # use velocities to condition onset mask
-        """Args: input1: (batch_size, data_length)
-                 input2:(batch_size, time_steps, classes_num)
-        Outputs: output_dict: dict, {'velocity_output': (batch_size, time_steps, classes_num)}"""
-        x1 = self.logmel_extractor(input1)  # batch=12, melbins=229, timsteps=1001 (new,torchaudio)
-        x1 = x1.unsqueeze(3)                # batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = self.bn0(x1)                   # batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = x1.transpose(1, 3)             # batch=12, ch=1, timsteps=1001, melbins=229
-        pre_velocity = self.velocity_model(x1)  # batch_size, time_steps, classes_num
-        x = torch.cat((pre_velocity, (pre_velocity.detach() ** 0.5) * input2), dim=2)  # TypeB
-        (x, _) = self.bilstm(x)             # x = F.dropout(x, p=0.5, training=self.training)
-        upd_velocity = torch.sigmoid(self.velo_fc(x))
-        output_dict = {'velocity_output': upd_velocity}
-        return output_dict
-
-
-class Dual_Velocity_ONF_C(nn.Module):
-    def __init__(self, frames_per_second, classes_num):
-        super(Dual_Velocity_ONF_C, self).__init__()
-        sample_rate, window_size, mel_bins, fmin = 16000, 2048, 229, 30
-        fmax, hop_size = sample_rate // 2, sample_rate // frames_per_second  # 16000Hz/100fps = 160steps/s
-        midfeat_onf, momentum = 5472, 0.01
-        self.logmel_extractor = T.MelSpectrogram(sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size, win_length=window_size,
-                                                 center=True, pad_mode="reflect", n_mels=mel_bins, f_min=fmin, f_max=fmax)
-        self.bn0 = nn.BatchNorm2d(mel_bins, momentum)
-        self.velocity_model = OriginalModelONF2018(classes_num, midfeat_onf, momentum)
-        self.bilstm = nn.LSTM(input_size=88 * 2, hidden_size=256, num_layers=1, bias=True, batch_first=True, dropout=0., bidirectional=True)
-        self.velo_fc = nn.Linear(512, classes_num, bias=True)
-        self.init_weight()
-    def init_weight(self):
-        init_bn(self.bn0)
-        init_bilstm(self.bilstm)
-        init_layer(self.velo_fc)
-    def forward(self, input1, input2): # use velocities to condition onset mask
-        """Args: input1: (batch_size, data_length)
-                 input2:(batch_size, time_steps, classes_num)
-        Outputs: output_dict: dict, {'velocity_output': (batch_size, time_steps, classes_num)}"""
-        x1 = self.logmel_extractor(input1)   # batch=12, melbins=229, timsteps=1001 (new,torchaudio)
-        x1 = x1.unsqueeze(3)                 # batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = self.bn0(x1)                    # batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = x1.transpose(1, 3)              # batch=12, ch=1, timsteps=1001, melbins=229
-        pre_velocity = self.velocity_model(x1)  # batch_size, time_steps, classes_num
-        (pre_velocity.detach() ** 0.5) * input2
-        x = torch.cat((pre_velocity, ((pre_velocity.detach()+input2) **0.5) *input2), dim=2)  # TypeC
-        (x, _) = self.bilstm(x)  # x = F.dropout(x, p=0.5, training=self.training)
-        upd_velocity = torch.sigmoid(self.velo_fc(x))
-        output_dict = {'velocity_output': upd_velocity}
-        return output_dict
-
-
-################ ONF Session ################# Triple input2 inpu3 ###############
-################ ONF Session ################# Triple input2 inpu3 ###############
-################ ONF Session ################# Triple input2 inpu3 ###############
+        """
+        TypeA/B/C 融合方式与 HPT、Mamba 相同。
+        """
+        x_feat = self.bn0(self.feature_extractor(input1).unsqueeze(3)).transpose(1, 3)
+        pre_velocity = self.velocity_model(x_feat)
+        x = torch.cat((pre_velocity, input2), dim=2)  # ← TypeA
+        (x, _) = self.bilstm(x)
+        return {'velocity_output': torch.sigmoid(self.velo_fc(x))}
 
 
 class Triple_Velocity_ONF(nn.Module):
-    def __init__(self, frames_per_second, classes_num):
-        super(Triple_Velocity_ONF, self).__init__()
-        sample_rate, window_size, mel_bins, fmin = 16000, 2048, 229, 30
-        fmax, hop_size = sample_rate // 2, sample_rate // frames_per_second  # 16000Hz/100fps = 160steps/s
-        midfeat_onf, momentum = 5472, 0.01
-        # Log Mel Spectrogram extractor
-        self.logmel_extractor = T.MelSpectrogram(sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size, win_length=window_size,
-                                                 center=True, pad_mode="reflect", n_mels=mel_bins, f_min=fmin, f_max=fmax)
-        self.bn0 = nn.BatchNorm2d(mel_bins, momentum)
-        self.velocity_model = OriginalModelONF2018(classes_num, midfeat_onf, momentum)
-        self.bilstm = nn.LSTM(input_size=88 * 3, hidden_size=256, num_layers=1, bias=True, batch_first=True, dropout=0., bidirectional=True)
-        self.velo_fc = nn.Linear(512, classes_num, bias=True)
+    def __init__(self, cfg):
+        super().__init__()
+        sr, fft, fps, feat, cls = (
+            cfg.feature.sample_rate,
+            cfg.feature.fft_size,
+            cfg.feature.frames_per_second,
+            cfg.feature.audio_feature,
+            cfg.feature.classes_num)
+        self.feature_extractor, self.FRE = get_feature_extractor_and_bins(feat, sr, fft, fps)
+        self.bn0 = nn.BatchNorm2d(self.FRE, 0.01)
+        self.velocity_model = OriginalModelONF2018(cls, self.FRE, 0.01)
+        self.bilstm = nn.LSTM(88 * 3, 256, 1, batch_first=True, bidirectional=True)
+        self.velo_fc = nn.Linear(512, cls, bias=True)
         self.init_weight()
     def init_weight(self):
         init_bn(self.bn0)
         init_bilstm(self.bilstm)
         init_layer(self.velo_fc)
     def forward(self, input1, input2, input3):
-        """Args: input1: (batch_size, data_length)
-                 input2:(batch_size, time_steps, classes_num)
-                 input3:(batch_size, time_steps, classes_num)
-        Outputs: output_dict: dict, {'velocity_output': (batch_size, time_steps, classes_num)}
-        Selection: x = torch.cat((pre_velocity, (pre_velocity ** 0.5) * input2), dim=2)"""
-        x1 = self.logmel_extractor(input1)  	# batch=12, melbins=229, timsteps=1001 (new,torchaudio)
-        x1 = x1.unsqueeze(3)  			# batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = self.bn0(x1)  			# batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = x1.transpose(1, 3)  		# batch=12, ch=1, timsteps=1001, melbins=229
-        pre_velocity = self.velocity_model(x1)  # batch_size, time_steps, classes_num
-        # Use velocities to condition onset regression, maybe input2.detach() is unnecessary
-        x = torch.cat((pre_velocity, input2, input3), dim=2)
-        (x, _) = self.bilstm(x)  # x = F.dropout(x, p=0.5, training=self.training)
-        upd_velocity = torch.sigmoid(self.velo_fc(x))
-        output_dict = {'velocity_output': upd_velocity}
-        return output_dict
-
-
-class Triple_Velocity_ONF_B(nn.Module):
-    def __init__(self, frames_per_second, classes_num):
-        super(Triple_Velocity_ONF_B, self).__init__()
-        sample_rate, window_size, mel_bins, fmin = 16000, 2048, 229, 30
-        fmax, hop_size = sample_rate // 2, sample_rate // frames_per_second  # 16000Hz/100fps = 160steps/s
-        midfeat_onf, momentum = 5472, 0.01
-        # Log Mel Spectrogram extractor
-        self.logmel_extractor = T.MelSpectrogram(sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size,
-                                                 win_length=window_size,
-                                                 center=True, pad_mode="reflect", n_mels=mel_bins, f_min=fmin, f_max=fmax)
-        self.bn0 = nn.BatchNorm2d(mel_bins, momentum)
-        self.velocity_model = OriginalModelONF2018(classes_num, midfeat_onf, momentum)
-        self.bilstm = nn.LSTM(input_size=88 * 3, hidden_size=256, num_layers=1,  # num_layers=2
-                              bias=True, batch_first=True, dropout=0., bidirectional=True)
-        self.velo_fc = nn.Linear(512, classes_num, bias=True)
-        self.init_weight()
-    def init_weight(self):
-        init_bn(self.bn0)
-        init_bilstm(self.bilstm)
-        init_layer(self.velo_fc)
-    def forward(self, input1, input2, input3):
-        """Args: input1: (batch_size, data_length)
-                 input2:(batch_size, time_steps, classes_num)
-                 input3:(batch_size, time_steps, classes_num)
-        Outputs: output_dict: dict, {'velocity_output': (batch_size, time_steps, classes_num)}"""
-        x1 = self.logmel_extractor(input1)  # batch=12, melbins=229, timsteps=1001 (new,torchaudio)
-        x1 = x1.unsqueeze(3)  # batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = self.bn0(x1)  # batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = x1.transpose(1, 3)  # batch=12, ch=1, timsteps=1001, melbins=229
-        pre_velocity = self.velocity_model(x1)  # batch_size, time_steps, classes_num
-        x = torch.cat((pre_velocity, (pre_velocity ** 0.5) * input2,  input3), dim=2)
-        (x, _) = self.bilstm(x)  # x = F.dropout(x, p=0.5, training=self.training)
-        upd_velocity = torch.sigmoid(self.velo_fc(x))
-        output_dict = {'velocity_output': upd_velocity}
-        return output_dict
-
-
-# class Triple_Velocity_ONF_drop2(nn.Module):
-#     def __init__(self, frames_per_second, classes_num):
-#         super(Triple_Velocity_ONF_drop2, self).__init__()
-#         sample_rate, window_size, mel_bins, fmin = 16000, 2048, 229, 30
-#         fmax, hop_size = sample_rate // 2, sample_rate // frames_per_second  # 16000Hz/100fps = 160steps/s
-#         midfeat_onf, momentum = 5472, 0.01
-#         # Log Mel Spectrogram extractor
-#         self.logmel_extractor = T.MelSpectrogram(sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size,
-#                                                  win_length=window_size,
-#                                                  center=True, pad_mode="reflect", n_mels=mel_bins, f_min=fmin,
-#                                                  f_max=fmax)
-#         self.bn0 = nn.BatchNorm2d(mel_bins, momentum)
-#         self.velocity_model = OriginalModelONF2018(classes_num, midfeat_onf, momentum)
-#         self.bilstm = nn.LSTM(input_size=88 * 3, hidden_size=256, num_layers=1,  # num_layers=2
-#                               bias=True, batch_first=True, dropout=0., bidirectional=True)
-#         self.velo_fc = nn.Linear(512, classes_num, bias=True)
-#         self.init_weight()
-#     def init_weight(self):
-#         init_bn(self.bn0)
-#         init_bilstm(self.bilstm)
-#         init_layer(self.velo_fc)
-#     def forward(self, input1, input2, input3):
-#         """Args: input1: (batch_size, data_length)
-#                  input2:(batch_size, time_steps, classes_num)
-#                  input3:(batch_size, time_steps, classes_num)
-#         Outputs: output_dict: dict, {'velocity_output': (batch_size, time_steps, classes_num)}"""
-#         x1 = self.logmel_extractor(input1)  # batch=12, melbins=229, timsteps=1001 (new,torchaudio)
-#         x1 = x1.unsqueeze(3)  # batch=12, melbins=229, timsteps=1001, ch=1
-#         x1 = self.bn0(x1)  # batch=12, melbins=229, timsteps=1001, ch=1
-#         x1 = x1.transpose(1, 3)  # batch=12, ch=1, timsteps=1001, melbins=229
-#         pre_velocity = self.velocity_model(x1)  # batch_size, time_steps, classes_num
-#         # Use velocities to condition onset regression, maybe input2.detach() is unnecessary
-#         x = torch.cat((pre_velocity, input2, input3), dim=2)
-#         x = F.dropout(x, p=0.2, training=self.training)
-#         (x, _) = self.bilstm(x)
-#         x = F.dropout(x, p=0.2, training=self.training)
-#         upd_velocity = torch.sigmoid(self.velo_fc(x))
-#         output_dict = {'velocity_output': upd_velocity}
-#         return output_dict
-
-################ Bad Result Session ################# Bad Result Session  ###############
-################ Bad Result Session ################# Bad Result Session  ###############
-class Dual_Velocity_ONF_drop2(nn.Module):
-    def __init__(self, frames_per_second, classes_num):
-        super(Dual_Velocity_ONF_drop2, self).__init__()
-        sample_rate, window_size, mel_bins, fmin = 16000, 2048, 229, 30
-        fmax, hop_size = sample_rate//2, sample_rate//frames_per_second # 16000Hz/100fps = 160steps/s
-        midfeat_onf, momentum = 5472, 0.01
-        # Log Mel Spectrogram extractor
-        self.logmel_extractor = T.MelSpectrogram(sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size, win_length=window_size, center=True, pad_mode="reflect", n_mels=mel_bins, f_min=fmin, f_max=fmax)
-        self.bn0 = nn.BatchNorm2d(mel_bins, momentum)
-        self.velocity_model = OriginalModelONF2018(classes_num, midfeat_onf, momentum)
-        self.bilstm = nn.LSTM(input_size=88 * 2, hidden_size=256, num_layers=1, bias=True, batch_first=True, dropout=0., bidirectional=True)
-        self.velo_fc = nn.Linear(512, classes_num, bias=True)
-        self.init_weight()
-    def init_weight(self):
-        init_bn(self.bn0)
-        init_bilstm(self.bilstm)
-        init_layer(self.velo_fc)
-    def forward(self, input1, input2):
-        x1 = self.logmel_extractor(input1)  # batch=12, melbins=229, timsteps=1001 (new,torchaudio)
-        x1 = x1.unsqueeze(3)				# batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = self.bn0(x1)				    # batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = x1.transpose(1, 3)				# batch=12, ch=1, timsteps=1001, melbins=229
-        pre_velocity = self.velocity_model(x1)  	# batch_size, time_steps, classes_num
-        x = torch.cat((pre_velocity, input2), dim=2)
-        x = F.dropout(x, p=0.2, training=self.training)
-        (x, _) = self.bilstm(x)			
-        x = F.dropout(x, p=0.2, training=self.training)
-        upd_velocity = torch.sigmoid(self.velo_fc(x))
-        output_dict = {'velocity_output': upd_velocity}
-        return output_dict
-
-
-class Dual_Velocity_ONF_droplstm(nn.Module):
-    def __init__(self, frames_per_second, classes_num):
-        super(Dual_Velocity_ONF_droplstm, self).__init__()
-        sample_rate, window_size, mel_bins, fmin = 16000, 2048, 229, 30
-        fmax, hop_size = sample_rate//2, sample_rate//frames_per_second # 16000Hz/100fps = 160steps/s
-        midfeat_onf, momentum = 5472, 0.01
-        # Log Mel Spectrogram extractor
-        self.logmel_extractor = T.MelSpectrogram(sample_rate=sample_rate, n_fft=window_size, hop_length=hop_size, win_length=window_size,
-                                                 center=True, pad_mode="reflect", n_mels=mel_bins, f_min=fmin, f_max=fmax)
-        self.bn0 = nn.BatchNorm2d(mel_bins, momentum)
-        self.velocity_model = OriginalModelONF2018(classes_num, midfeat_onf, momentum)
-        self.velo_fc = nn.Linear(88*2, classes_num, bias=True)
-        self.init_weight()
-    def init_weight(self):
-        init_bn(self.bn0)
-        init_layer(self.velo_fc)
-    def forward(self, input1, input2):
-        """Args: input1: (batch_size, data_length)
-                 input2:(batch_size, time_steps, classes_num)
-        Outputs: output_dict: dict, {'velocity_output': (batch_size, time_steps, classes_num)}
-        Selection: x = torch.cat((pre_velocity, (pre_velocity ** 0.5) * input2), dim=2)"""
-        x1 = self.logmel_extractor(input1)  		# batch=12, melbins=229, timsteps=1001 (new,torchaudio)
-        x1 = x1.unsqueeze(3)				# batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = self.bn0(x1)				# batch=12, melbins=229, timsteps=1001, ch=1
-        x1 = x1.transpose(1, 3)				# batch=12, ch=1, timsteps=1001, melbins=229
-        pre_velocity = self.velocity_model(x1)  	# batch_size, time_steps, classes_num
-        # Use velocities to condition onset regression, maybe input2.detach() is necessary
-        x = torch.cat((pre_velocity, input2), dim=2)
-        upd_velocity = torch.sigmoid(self.velo_fc(x))
-        output_dict = {'velocity_output': upd_velocity}
-        return output_dict
+        """
+        TypeA/B/C 同 HPT 三输入版本。
+        """
+        x_feat = self.bn0(self.feature_extractor(input1).unsqueeze(3)).transpose(1, 3)
+        pre_velocity = self.velocity_model(x_feat)
+        x = torch.cat((pre_velocity, input2, input3), dim=2)  # ← TypeA
+        (x, _) = self.bilstm(x)
+        return {'velocity_output': torch.sigmoid(self.velo_fc(x))}

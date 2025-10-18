@@ -14,7 +14,7 @@ exp:
   decay: True # False
   reduce_iteration: 10_000 # 6_000
   loss_type: "velocity_bce"
-  random_seed: 13
+  random_seed: 86
 
   mini_data: False # True when developing model
   cuda: True
@@ -28,15 +28,23 @@ exp:
 
 
 feature:
+  audio_feature: "logmel"
+  classes_num: 88
+  # ---------------------------
+  # dataloader.py params
   segment_seconds: 10.
   hop_seconds: 1.
-  frames_per_second: 100
+  # ---------------------------
+  # feature_extractor.py params
+  # mel_bins: 229 # 去feature extractor里面手动定义吧
   sample_rate: 16000
-  classes_num: 88
+  fft_size: 2048
+  frames_per_second: 100
+  augmentor: null
+  # ---------------------------
   begin_note: 21
   velocity_scale: 128
   max_note_shift: 0
-  augmentor: null
 
 
 dataset:

@@ -44,7 +44,7 @@ def train(cfg):
     """
     # Arugments & parameters
     device = torch.device('cuda') if cfg.exp.cuda and torch.cuda.is_available() else torch.device('cpu')
-    model = eval(cfg.model.name)(frames_per_second=cfg.feature.frames_per_second, classes_num=cfg.feature.classes_num).to(device)
+    model = eval(cfg.model.name)(cfg).to(device)
 
     # Remove in formal
     if cfg.model.name == 'Single_Velocity_HPT':
