@@ -1,6 +1,6 @@
 wandb:
   project: "202510_hpt"
-  name: "${model.name}-ext${model.input2}${model.input3}-iter${exp.total_iteration}-lr${exp.learning_rate}-decay${exp.decay}${exp.reduce_iteration}-seed${exp.random_seed}" # -iter${exp.total_iteration}
+  name: "${feature.audio_feature}-${model.name}-ext${model.input2}${model.input3}-iter${exp.total_iteration}-lr${exp.learning_rate}-decay${exp.decay}${exp.reduce_iteration}-seed${exp.random_seed}" # -iter${exp.total_iteration}
 
 exp:
   # workspace: "./workspaces"

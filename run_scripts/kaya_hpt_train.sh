@@ -3,12 +3,12 @@
 #SBATCH --output=hpt_progress_%A_%a.log
 #SBATCH --error=hpt_error_%A_%a.log
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=6
 #SBATCH --gres=gpu:p100:1
 #SBATCH --time=72:00:00
 #SBATCH --partition=gpu
 #SBATCH --mem=16G
-#SBATCH --array=0-6
+#SBATCH --array=0-13
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=zhanh.he@research.uwa.edu.au
 
@@ -33,9 +33,9 @@ echo "SLURM ID: $SLURM_ARRAY_ID $SLURM_ARRAY_TASK_ID"
 
 #  These are generic variables
 FOLDER_NAME=${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}
-EXECUTABLE=$HOME/202503_hpt
-SCRATCH=$MYSCRATCH/202503_hpt/$FOLDER_NAME
-RESULTS=$MYGROUP/202503_hpt_results/$FOLDER_NAME 
+EXECUTABLE=$HOME/202510_hpt
+SCRATCH=$MYSCRATCH/202510_hpt/$FOLDER_NAME
+RESULTS=$MYGROUP/202510_hpt_results/$FOLDER_NAME 
 
 ###############################################
 # Creates a unique directory in the SCRATCH directory for this job to run in.
@@ -55,24 +55,31 @@ echo the results directory is $RESULTS
 # Copy input files to $SCRATCH, then change directory to $SCRATCH
 echo "Copy path $EXECUTABLE to $SCRATCH"
 cp -r $EXECUTABLE $SCRATCH
-cd $SCRATCH/202503_hpt
+cd $SCRATCH/202510_hpt
 
 #############################################
 # link the dataset to real data folder
 # echo "MYSCRATCH path: $MYSCRATCH/workspaces"
-ln -s $MYSCRATCH/workspaces/hdf5s $SCRATCH/202503_hpt/workspaces/hdf5s
+ln -s $MYSCRATCH/hpt_workspaces/hdf5s $SCRATCH/202510_hpt/workspaces/hdf5s
 
 #############################################
 # Run your script with passed arguments
 
 declare -a EXPERIMENTS=(
-"python pytorch/main_iter.py model.name='Single_Velocity_HPT'"
-"python pytorch/main_iter.py model.name='Dual_Velocity_HPT' model.input2='onset'"
-"python pytorch/main_iter.py model.name='Dual_Velocity_HPT' model.input2='frame'"
-"python pytorch/main_iter.py model.name='Dual_Velocity_HPT' model.input2='exframe'"
-"python pytorch/main_iter.py model.name='Triple_Velocity_HPT' model.input2='onset' model.input3='frame'"
-"python pytorch/main_iter.py model.name='Triple_Velocity_HPT' model.input2='onset' model.input3='exframe'"
-"python pytorch/main_iter.py model.name='Triple_Velocity_HPT' model.input2='frame' model.input3='exframe'"
+"python pytorch/main_iter.py feature.audio_feature="logmel" model.name='Single_Velocity_HPT'"
+"python pytorch/main_iter.py feature.audio_feature="logmel" model.name='Dual_Velocity_HPT' model.input2='onset'"
+"python pytorch/main_iter.py feature.audio_feature="logmel" model.name='Dual_Velocity_HPT' model.input2='frame'"
+"python pytorch/main_iter.py feature.audio_feature="logmel" model.name='Dual_Velocity_HPT' model.input2='exframe'"
+"python pytorch/main_iter.py feature.audio_feature="logmel" model.name='Triple_Velocity_HPT' model.input2='onset' model.input3='frame'"
+"python pytorch/main_iter.py feature.audio_feature="logmel" model.name='Triple_Velocity_HPT' model.input2='onset' model.input3='exframe'"
+"python pytorch/main_iter.py feature.audio_feature="logmel" model.name='Triple_Velocity_HPT' model.input2='frame' model.input3='exframe'"
+"python pytorch/main_iter.py feature.audio_feature="sone" model.name='Single_Velocity_HPT'"
+"python pytorch/main_iter.py feature.audio_feature="sone" model.name='Dual_Velocity_HPT' model.input2='onset'"
+"python pytorch/main_iter.py feature.audio_feature="sone" model.name='Dual_Velocity_HPT' model.input2='frame'"
+"python pytorch/main_iter.py feature.audio_feature="sone" model.name='Dual_Velocity_HPT' model.input2='exframe'"
+"python pytorch/main_iter.py feature.audio_feature="sone" model.name='Triple_Velocity_HPT' model.input2='onset' model.input3='frame'"
+"python pytorch/main_iter.py feature.audio_feature="sone" model.name='Triple_Velocity_HPT' model.input2='onset' model.input3='exframe'"
+"python pytorch/main_iter.py feature.audio_feature="sone" model.name='Triple_Velocity_HPT' model.input2='frame' model.input3='exframe'"
 )
 
 CMD="${EXPERIMENTS[$SLURM_ARRAY_TASK_ID]}"
