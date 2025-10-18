@@ -11,6 +11,9 @@ from utilities import (create_folder, float32_to_int16, create_logging,
     get_filename, read_metadata, read_midi)
 
 
+def _sr_tag(cfg):
+    return f"sr{int(cfg.feature.sample_rate)}"
+
 def pack_maestro_dataset_to_hdf5(cfg):
     """
     Load & resample MAESTRO audio files, then write to HDF5 files.
@@ -23,8 +26,9 @@ def pack_maestro_dataset_to_hdf5(cfg):
     
     # Paths for metadata, output, and logs
     csv_path = os.path.join(dataset_dir, 'maestro-v3.0.0.csv')
-    waveform_hdf5s_dir = os.path.join(cfg.exp.workspace, 'hdf5s', 'maestro')
-    logs_dir = os.path.join(cfg.exp.workspace, 'logs', get_filename(__file__))
+    dataset_name = f"maestro_{_sr_tag(cfg)}"
+    waveform_hdf5s_dir = os.path.join(cfg.exp.workspace, 'hdf5s', dataset_name)
+    logs_dir = os.path.join(cfg.exp.workspace, 'logs', f"{get_filename(__file__)}_{dataset_name}")
     create_logging(logs_dir, filemode='w')
     logging.info(f"Packing MAESTRO dataset: {dataset_dir}")
 
@@ -88,8 +92,9 @@ def pack_maps_dataset_to_hdf5(cfg):
 
     # Parameters and paths
     pianos = ['ENSTDkCl', 'ENSTDkAm']
-    waveform_hdf5s_dir = os.path.join(cfg.exp.workspace, 'hdf5s', 'maps')
-    logs_dir = os.path.join(cfg.exp.workspace, 'logs', get_filename(__file__))
+    dataset_name = f"maps_{_sr_tag(cfg)}"
+    waveform_hdf5s_dir = os.path.join(cfg.exp.workspace, 'hdf5s', dataset_name)
+    logs_dir = os.path.join(cfg.exp.workspace, 'logs', f"{get_filename(__file__)}_{dataset_name}")
     create_logging(logs_dir, filemode='w')
     logging.info(f"Packing MAPS dataset: {dataset_dir}")
 
@@ -147,8 +152,9 @@ def pack_smd_dataset_to_hdf5(cfg):
     dataset_dir = cfg.dataset.smd_dir
 
     # Paths
-    waveform_hdf5s_dir = os.path.join(cfg.exp.workspace, 'hdf5s', 'smd')
-    logs_dir = os.path.join(cfg.exp.workspace, 'logs', get_filename(__file__))
+    dataset_name = f"smd_{_sr_tag(cfg)}"
+    waveform_hdf5s_dir = os.path.join(cfg.exp.workspace, 'hdf5s', dataset_name)
+    logs_dir = os.path.join(cfg.exp.workspace, 'logs', f"{get_filename(__file__)}_{dataset_name}")
     create_logging(logs_dir, filemode='w')
     logging.info(f"Packing SMD dataset: {dataset_dir}")
 

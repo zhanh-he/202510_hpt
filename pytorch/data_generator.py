@@ -22,7 +22,7 @@ class Maestro_Dataset(object):
         """
         self.cfg = cfg
         self.random_state = np.random.RandomState(cfg.exp.random_seed)
-        self.hdf5s_dir = os.path.join(cfg.exp.workspace, 'hdf5s', 'maestro')
+        self.hdf5s_dir = os.path.join(cfg.exp.workspace, 'hdf5s', f"maestro_sr{int(cfg.feature.sample_rate)}")
         self.segment_samples = int(cfg.feature.sample_rate * cfg.feature.segment_seconds)
         # Used for processing MIDI events to target | GroundTruth
         self.target_processor = TargetProcessor(cfg.feature.segment_seconds, cfg)
@@ -112,7 +112,7 @@ class MAPS_Dataset(object):
         """
         self.cfg = cfg
         self.random_state = np.random.RandomState(cfg.exp.random_seed)
-        self.hdf5s_dir = os.path.join(cfg.exp.workspace, 'hdf5s', 'maps')
+        self.hdf5s_dir = os.path.join(cfg.exp.workspace, 'hdf5s', f"maps_sr{int(cfg.feature.sample_rate)}")
         self.segment_samples = int(cfg.feature.sample_rate * cfg.feature.segment_seconds)
         # Used for processing MIDI events to target | GroundTruth
         self.target_processor = TargetProcessor(cfg.feature.segment_seconds, cfg)
@@ -183,7 +183,7 @@ class SMD_Dataset(object):
         """
         self.cfg = cfg
         self.random_state = np.random.RandomState(cfg.exp.random_seed)
-        self.hdf5s_dir = os.path.join(cfg.exp.workspace, 'hdf5s', 'smd')
+        self.hdf5s_dir = os.path.join(cfg.exp.workspace, 'hdf5s', f"smd_sr{int(cfg.feature.sample_rate)}")
         self.segment_samples = int(cfg.feature.sample_rate * cfg.feature.segment_seconds)
         # Used for processing MIDI events to target | GroundTruth
         self.target_processor = TargetProcessor(cfg.feature.segment_seconds, cfg)
@@ -296,8 +296,14 @@ class Sampler(object):
         """
         assert split in ['train', 'validation', 'test']
         self.is_eval = is_eval
-        self.hdf5s_dir = f"./workspaces/hdf5s/{is_eval}" if split == "test" else cfg.dataset.train_h5
-        # self.hdf5s_dir = cfg.dataset.test_h5 if split == "test" else cfg.dataset.train_h5
+        # Point test/eval to the same workspace root used by packing
+        sr_tag = f"sr{int(cfg.feature.sample_rate)}"
+        if split == "test":
+            # Evaluate against a specific dataset name passed via is_eval (e.g., "maestro"|"smd"|"maps")
+            self.hdf5s_dir = os.path.join(cfg.exp.workspace, 'hdf5s', f"{is_eval}_{sr_tag}")
+        else:
+            # Train/validation use configured train_set, suffixed by sample rate
+            self.hdf5s_dir = os.path.join(cfg.exp.workspace, 'hdf5s', f"{cfg.dataset.train_set}_{sr_tag}")
         self.segment_seconds = cfg.feature.segment_seconds
         self.hop_seconds = cfg.feature.hop_seconds
         self.sample_rate = cfg.feature.sample_rate

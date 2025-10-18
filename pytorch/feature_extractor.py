@@ -208,38 +208,38 @@ class PsychoFeatureExtractor(nn.Module):
 
 class LogMelExtractor(nn.Module):
     """
-    Log-Mel spectrogram extractor using torchaudio.
-    Parameters follow common usage in singing voice dynamics estimation (ISMIR2024 Joyti Narang).
-    - norm & mel_scale="slaney" is good for human perception
-    - norm=None, mel_scale='htk' is good for pitch estimation
-    
-    Output shape: (B, M, F)
-    - B: batch size
-    - M: number of Mel bands
-    - F: number of frames
-
-    FPS:
-    - sr 44100 / fps 86 = hop_size 512, 50% overlap as fft_size is 1024
+    Log-Mel spectrogram extractor (torchaudio-based).
+    Usage profiles:
+        - ISMIR2024 (Narang): sr=44100, n_fft=1024, fps=86, mel_bins=128
+        - BeatThis ISMIR2024: sr=22050, n_fft=1024, fps=86, mel_bins=128
+        - HPT (Kong et al. 2020): sr=16000, n_fft=2048, fps=100, mel_bins=229
+    Notes:
+        - "slaney" scale suits perceptual tasks (dynamics, timbre)
+        - "htk" scale suits pitch/transcription tasks
+        - FPS≈sr/fps → hop_size controls temporal density
+        - Output: (B, M, F) → batch × mel_bins × frames
     """
-    def __init__(self, sample_rate=44100, fft_size=1024, frames_per_second=86, return_mode: Literal["logmel", "mel"] = "logmel"):
+    def __init__(self, sample_rate=44100, fft_size=1024, frames_per_second=86,
+                 return_mode: Literal["logmel", "mel"] = "logmel"):
         super().__init__()
-        self.mel_bins = 128 # 128 default in librosa & torchaudio & beat_this ISMIR2024
-        hop_size, fmin, fmax = int(sample_rate // frames_per_second), 30, int(sample_rate//2) 
-        self.mel_spectrogram = torchaudio.transforms.MelSpectrogram(sample_rate=sample_rate, n_fft=fft_size, hop_length=hop_size, n_mels=self.mel_bins,
-                                                                    center=True, pad_mode='reflect', f_min=fmin, f_max=fmax, 
-                                                                    power=2.0, norm="slaney", mel_scale="slaney")
+        self.mel_bins = 229
+        # Alt settings:
+        # sample_rate=22050, fft_size=1024, frames_per_second=86  # BeatThis
+        # sample_rate=16000, fft_size=2048, frames_per_second=100; self.mel_bins=229  # HPT
+        hop_size, fmin, fmax = int(sample_rate // frames_per_second), 30, int(sample_rate // 2)
+        self.mel_spectrogram = torchaudio.transforms.MelSpectrogram(
+            sample_rate=sample_rate, n_fft=fft_size, hop_length=hop_size, n_mels=self.mel_bins,
+            center=True, pad_mode='reflect', f_min=fmin, f_max=fmax,
+            power=2.0, norm="slaney", mel_scale="slaney"
+        )
         self.amplitude_to_db = torchaudio.transforms.AmplitudeToDB(stype='power')
         self.return_mode = return_mode
 
     def forward(self, wav: torch.Tensor):
-        # Compute Mel Spectrogram (power). Optionally convert to dB.
-        mel_spec = self.mel_spectrogram(wav)
-        if self.return_mode == "logmel":
-            return self.amplitude_to_db(mel_spec)
-        elif self.return_mode == "mel":
-            return mel_spec
-        else:
-            raise ValueError(f"Invalid return_mode for LogMelExtractor: {self.return_mode}")
+        mel = self.mel_spectrogram(wav)
+        if self.return_mode == "logmel": return self.amplitude_to_db(mel)
+        elif self.return_mode == "mel": return mel
+        else: raise ValueError(f"Invalid return_mode: {self.return_mode}")
 
 
 # --- Unified MoSQIToExtractor ---

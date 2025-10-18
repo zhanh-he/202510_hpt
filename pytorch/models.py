@@ -73,7 +73,8 @@ class Mamba1(nn.Module):
         with torch.no_grad():
             dummy = torch.zeros((1, 1, 1000, input_shape))
             x = self.conv_block4(self.conv_block3(self.conv_block2(self.conv_block1(dummy))))
-            midfeat = x.shape[2] * x.shape[3]
+            # Flatten later uses x.transpose(1,2).flatten(2) -> channels * freq
+            midfeat = x.shape[1] * x.shape[3]
         self.fc5 = nn.Linear(midfeat, 768, bias=False)
         self.bn5 = nn.BatchNorm1d(768, momentum)
         self.mamba = Mamba(d_model=768, d_state=16, d_conv=4, expand=2)
@@ -217,7 +218,8 @@ class OriginalModelHPT2020(nn.Module):
             x = self.conv_block2(x)
             x = self.conv_block3(x)
             x = self.conv_block4(x)
-            midfeat = x.shape[2] * x.shape[3]  # time × freq → flatten(2)
+            # Flatten later uses x.transpose(1,2).flatten(2) -> channels × freq
+            midfeat = x.shape[1] * x.shape[3]
         self.fc5 = nn.Linear(in_features=midfeat, out_features=768, bias=False)
         self.bn5 = nn.BatchNorm1d(768, momentum=momentum)
         self.gru = nn.GRU(input_size=768, hidden_size=256, num_layers=2,
