@@ -396,7 +396,7 @@ class EvalSampler(Sampler):
           random_seed: int, random seed for reproducibility.
         """
         super().__init__(cfg, split, is_eval)
-        self.max_evaluate_iteration = 20 # Limit validation iterations
+        self.max_evaluate_iteration = 40 # Limit validation iterations
 
     def __iter__(self):
         pointer = 0
