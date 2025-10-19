@@ -3,9 +3,10 @@ wandb:
   name: "${feature.audio_feature}-${model.name}-ext${model.input2}${model.input3}-iter${exp.total_iteration}-lr${exp.learning_rate}-decay${exp.decay}${exp.reduce_iteration}-seed${exp.random_seed}" # -iter${exp.total_iteration}
 
 exp:
-  # workspace: "./workspaces"
-  workspace: "/media/datadisk/home/22828187/zhanh/202510_hpt_data/workspaces"
-  # workspace: "/Users/hanyu/Documents/ipynb/202510_hpt_data/workspaces"
+  # workspace: "./workspaces" #kaya
+  workspace: "/media/datadisk/home/22828187/zhanh/202510_hpt_data/workspaces" #uwa
+  # workspace: "/Users/hanyu/Documents/ipynb/202510_hpt_data/workspaces" #mac
+  # workspace: "/media/mengh/SharedData/zhanh/202510_hpt_data/workspaces" #mengh
   resume_iteration: 0
   total_iteration: 60_000 # 200_000 # 300_000 # 360_000
   save_iteration: 5_000   # 6_000 # 6_000
@@ -59,9 +60,6 @@ dataset:
   test_h5: "${exp.workspace}/hdf5s/${dataset.test_set}"
 
   # Provide dataset dir to process the features.py
-  # smd_dir: "/mnt/d/ipynb/dataset/SMD"
-  # maestro_dir: "/mnt/d/ipynb/dataset/maestro-v3.0.0"
-  # maps_dir: "/mnt/d/ipynb/dataset/MAPS_dataset"
   smd_dir: "/Users/hanyu/Documents/ipynb/202510_hpt_data/SMD"
   maestro_dir: "/Users/hanyu/Documents/ipynb/202510_hpt_data/maestro-v3.0.0"
   maps_dir: "/Users/hanyu/Documents/ipynb/202510_hpt_data/MAPS"
