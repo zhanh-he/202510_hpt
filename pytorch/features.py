@@ -200,19 +200,19 @@ def pack_smd_dataset_to_hdf5(cfg):
 
 
 if __name__ == '__main__':
-    # Initialize Hydra
-    initialize(config_path="./", job_name="features", version_base=None)
-    cfg = compose(config_name="config")
-
-    # Argument parser setup
+    # Argument parser setup (allow Hydra-style overrides after the subcommand)
     parser = argparse.ArgumentParser(description='Dataset packing utilities')
     subparsers = parser.add_subparsers(dest='mode', required=True, help='Select a mode of operation')
     subparsers.add_parser('pack_maestro_dataset_to_hdf5', help='Pack Maestro dataset to HDF5')
     subparsers.add_parser('pack_maps_dataset_to_hdf5', help='Pack MAPS dataset to HDF5')
     subparsers.add_parser('pack_smd_dataset_to_hdf5', help='Pack SMD dataset to HDF5')
 
-    # Parse arguments
-    args = parser.parse_args()
+    # Parse known args; pass the rest to Hydra as overrides
+    args, hydra_overrides = parser.parse_known_args()
+
+    # Initialize Hydra and compose config with overrides, e.g. feature.sample_rate=22050
+    initialize(config_path="./", job_name="features", version_base=None)
+    cfg = compose(config_name="config", overrides=hydra_overrides)
 
     # Call the appropriate function based on the mode
     mode_to_function = {

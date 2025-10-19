@@ -60,7 +60,7 @@ cd $SCRATCH/202510_hpt
 #############################################
 # link the dataset to real data folder
 # echo "MYSCRATCH path: $MYSCRATCH/workspaces"
-ln -s $MYSCRATCH/hpt_workspaces/hdf5s $SCRATCH/202510_hpt/workspaces/hdf5s
+ln -s $MYSCRATCH/workspaces/hdf5s $SCRATCH/202510_hpt/workspaces/hdf5s
 
 #############################################
 # Run your script with passed arguments
