@@ -7,9 +7,9 @@ exp:
   workspace: "/media/datadisk/home/22828187/zhanh/202510_hpt_data/workspaces"
   # workspace: "/Users/hanyu/Documents/ipynb/202510_hpt_data/workspaces"
   resume_iteration: 0
-  total_iteration: 200_000 # 300_000 # 360_000
-  save_iteration: 5_000 # 6_000 # 6_000
-  eval_iteration: 5_000 # 6_000 # 6_000
+  total_iteration: 60_000 # 200_000 # 300_000 # 360_000
+  save_iteration: 5_000   # 6_000 # 6_000
+  eval_iteration: 5_000   # 6_000 # 6_000
 
   learning_rate: 1e-4 # 3e-4 # 1e-4
   optim: "adam" # "adam", "ranger", Ranger: default betas=(0.9, 0.999), eps=1e-08, weight_decay=0.
