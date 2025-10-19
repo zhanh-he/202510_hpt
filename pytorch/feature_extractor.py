@@ -222,7 +222,7 @@ class LogMelExtractor(nn.Module):
     def __init__(self, sample_rate=44100, fft_size=1024, frames_per_second=86,
                  return_mode: Literal["logmel", "mel"] = "logmel"):
         super().__init__()
-        self.mel_bins = 128
+        self.mel_bins = 229
         # Alt settings:
         # sample_rate=22050, fft_size=1024, frames_per_second=86  # BeatThis
         # sample_rate=16000, fft_size=2048, frames_per_second=100; self.mel_bins=229  # HPT

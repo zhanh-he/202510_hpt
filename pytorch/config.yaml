@@ -5,9 +5,9 @@ wandb:
 
 exp:
   # workspace: "./workspaces" #kaya
-  workspace: "/media/datadisk/home/22828187/zhanh/202510_hpt_data/workspaces" #uwa
+  # workspace: "/media/datadisk/home/22828187/zhanh/202510_hpt_data/workspaces" #uwa
   # workspace: "/Users/hanyu/Documents/ipynb/202510_hpt_data/workspaces" #mac
-  # workspace: "/media/mengh/SharedData/zhanh/202510_hpt_data/workspaces" #mengh
+  workspace: "/media/mengh/SharedData/zhanh/202510_hpt_data/workspaces" #mengh
   resume_iteration: 0
   total_iteration: 60_000 # 200_000 # 300_000 # 360_000
   save_iteration: 5_000   # 6_000 # 6_000
@@ -41,7 +41,7 @@ feature:
   # ---------------------------
   # feature_extractor.py params
   # mel_bins: 229 # 去feature extractor里面手动定义吧
-  sample_rate: 16000
+  sample_rate: 22050
   fft_size: 2048
   frames_per_second: 100
   augmentor: null
