@@ -5,11 +5,21 @@ import numpy as np
 import torch
 from pytorch_utils import forward_dataloader
 
+
+def _align_time_dim_np(*arrays):
+    """Trim numpy arrays along time axis (dim=1) to the minimum shared length."""
+    if not arrays:
+        return arrays
+    min_steps = min(arr.shape[1] for arr in arrays)
+    if all(arr.shape[1] == min_steps for arr in arrays):
+        return arrays
+    return tuple(arr[:, :min_steps, ...] for arr in arrays)
+
+
 def prepare_tensor(y_pred, y_true, mask):
-    # Force predicted data len same as groundtruth
-    y_pred = y_pred[0: y_true.shape[0], :] 
-    y_true = y_true[0: y_pred.shape[0], :]
-    mask = mask[0: y_true.shape[0], :] 
+    """Align time dimension and convert to tensors."""
+    y_pred, y_true, mask = _align_time_dim_np(y_pred, y_true, mask)
+    mask = mask.astype(bool)
     y_pred_tensor = torch.from_numpy(y_pred)
     y_true_tensor = torch.from_numpy(y_true)
     mask_tensor = torch.from_numpy(mask)

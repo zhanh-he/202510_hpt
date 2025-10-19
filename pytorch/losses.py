@@ -1,16 +1,30 @@
 import torch
 
+
+def _align_time_dim(*tensors):
+    """Trim all tensors along time dimension to the minimum shared length."""
+    if not tensors:
+        return tensors
+    min_steps = min(tensor.size(1) for tensor in tensors)
+    if all(tensor.size(1) == min_steps for tensor in tensors):
+        return tensors
+    return tuple(tensor[:, :min_steps] for tensor in tensors)
+
+
 def bce(output, target, mask):
     """Binary crossentropy (BCE) with mask. The positions where mask=0 will be 
     deactivated when calculation BCE."""
+    output, target, mask = _align_time_dim(output, target, mask)
     eps = 1e-7
     output = torch.clamp(output, eps, 1. - eps)
     matrix = - target * torch.log(output) - (1. - target) * torch.log(1. - output)
     return torch.sum(matrix * mask) / torch.sum(mask)
 
+
 def mse(output, target, mask):
     """Mean squared error (MSE) with mask"""
-    return torch.sum(((output - target) ** 2) * mask)/ torch.sum(mask)
+    output, target, mask = _align_time_dim(output, target, mask)
+    return torch.sum(((output - target) ** 2) * mask) / torch.sum(mask)
 
 # def mae(output, target, mask):
 #     """Mean absolute error (MAE) with mask"""
@@ -72,6 +86,7 @@ def count_inversions(model, output_dict, target_dict):
 
     mask = target_dict['frame_roll']
     tensor = output_dict['velocity_output']
+    mask, tensor = _align_time_dim(mask, tensor)
     
     batch_size, rows, cols = tensor.shape
     inversions = torch.zeros((batch_size, rows), dtype=torch.float).to(device)
