@@ -1,6 +1,7 @@
 wandb:
   project: "202510_hpt"
-  name: "${feature.audio_feature}-${model.name}-ext${model.input2}${model.input3}-iter${exp.total_iteration}-lr${exp.learning_rate}-decay${exp.decay}${exp.reduce_iteration}-seed${exp.random_seed}" # -iter${exp.total_iteration}
+  name: "${feature.audio_feature}-${model.name}-ext${model.input2}${model.input3}-${wandb.comment}-sr${feature.sample_rate}" # -iter${exp.total_iteration}
+  comment: "mel128"
 
 exp:
   # workspace: "./workspaces" #kaya
