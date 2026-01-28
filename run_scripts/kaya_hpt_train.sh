@@ -3,12 +3,12 @@
 #SBATCH --output=hpt_progress_%A_%a.log
 #SBATCH --error=hpt_error_%A_%a.log
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=6
-#SBATCH --gres=gpu:p100:1
+#SBATCH --cpus-per-task=12
+#SBATCH --gres=gpu:1
 #SBATCH --time=72:00:00
 #SBATCH --partition=gpu
 #SBATCH --mem=16G
-#SBATCH --array=0-13
+#SBATCH --array=0-1
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=zhanh.he@research.uwa.edu.au
 
@@ -66,20 +66,22 @@ ln -s $MYSCRATCH/workspaces/hdf5s $SCRATCH/202510_hpt/workspaces/hdf5s
 # Run your script with passed arguments
 
 declare -a EXPERIMENTS=(
-"python pytorch/main_iter.py feature.audio_feature="logmel" model.name='Single_Velocity_HPT'"
-"python pytorch/main_iter.py feature.audio_feature="logmel" model.name='Dual_Velocity_HPT' model.input2='onset'"
-"python pytorch/main_iter.py feature.audio_feature="logmel" model.name='Dual_Velocity_HPT' model.input2='frame'"
-"python pytorch/main_iter.py feature.audio_feature="logmel" model.name='Dual_Velocity_HPT' model.input2='exframe'"
-"python pytorch/main_iter.py feature.audio_feature="logmel" model.name='Triple_Velocity_HPT' model.input2='onset' model.input3='frame'"
-"python pytorch/main_iter.py feature.audio_feature="logmel" model.name='Triple_Velocity_HPT' model.input2='onset' model.input3='exframe'"
-"python pytorch/main_iter.py feature.audio_feature="logmel" model.name='Triple_Velocity_HPT' model.input2='frame' model.input3='exframe'"
-"python pytorch/main_iter.py feature.audio_feature="sone" model.name='Single_Velocity_HPT'"
-"python pytorch/main_iter.py feature.audio_feature="sone" model.name='Dual_Velocity_HPT' model.input2='onset'"
-"python pytorch/main_iter.py feature.audio_feature="sone" model.name='Dual_Velocity_HPT' model.input2='frame'"
-"python pytorch/main_iter.py feature.audio_feature="sone" model.name='Dual_Velocity_HPT' model.input2='exframe'"
-"python pytorch/main_iter.py feature.audio_feature="sone" model.name='Triple_Velocity_HPT' model.input2='onset' model.input3='frame'"
-"python pytorch/main_iter.py feature.audio_feature="sone" model.name='Triple_Velocity_HPT' model.input2='onset' model.input3='exframe'"
-"python pytorch/main_iter.py feature.audio_feature="sone" model.name='Triple_Velocity_HPT' model.input2='frame' model.input3='exframe'"
+# "python pytorch/main_iter.py feature.audio_feature="logmel" model.name='Single_Velocity_HPT'"
+# "python pytorch/main_iter.py feature.audio_feature="logmel" model.name='Dual_Velocity_HPT' model.input2='onset'"
+# "python pytorch/main_iter.py feature.audio_feature="logmel" model.name='Dual_Velocity_HPT' model.input2='frame'"
+# "python pytorch/main_iter.py feature.audio_feature="logmel" model.name='Dual_Velocity_HPT' model.input2='exframe'"
+# "python pytorch/main_iter.py feature.audio_feature="logmel" model.name='Triple_Velocity_HPT' model.input2='onset' model.input3='frame'"
+# "python pytorch/main_iter.py feature.audio_feature="logmel" model.name='Triple_Velocity_HPT' model.input2='onset' model.input3='exframe'"
+# "python pytorch/main_iter.py feature.audio_feature="logmel" model.name='Triple_Velocity_HPT' model.input2='frame' model.input3='exframe'"
+# "python pytorch/main_iter.py feature.audio_feature="sone" model.name='Single_Velocity_HPT'"
+# "python pytorch/main_iter.py feature.audio_feature="sone" model.name='Dual_Velocity_HPT' model.input2='onset'"
+# "python pytorch/main_iter.py feature.audio_feature="sone" model.name='Dual_Velocity_HPT' model.input2='frame'"
+# "python pytorch/main_iter.py feature.audio_feature="sone" model.name='Dual_Velocity_HPT' model.input2='exframe'"
+# "python pytorch/main_iter.py feature.audio_feature="sone" model.name='Triple_Velocity_HPT' model.input2='onset' model.input3='frame'"
+# "python pytorch/main_iter.py feature.audio_feature="sone" model.name='Triple_Velocity_HPT' model.input2='onset' model.input3='exframe'"
+# "python pytorch/main_iter.py feature.audio_feature="sone" model.name='Triple_Velocity_HPT' model.input2='frame' model.input3='exframe'"
+"python pytorch/main_iter.py feature.audio_feature="logmel" model.name='DynestAudioCNN'"
+"python pytorch/main_iter.py feature.audio_feature="sone" model.name='DynestAudioCNN'"
 )
 
 CMD="${EXPERIMENTS[$SLURM_ARRAY_TASK_ID]}"

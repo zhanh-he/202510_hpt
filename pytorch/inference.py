@@ -1,3 +1,4 @@
+import inspect
 import os
 import time
 import sys
@@ -18,6 +19,7 @@ from models import (
     Single_Velocity_HPT, Dual_Velocity_HPT, Triple_Velocity_HPT,
     Single_Velo_Mamba1, 
 )
+from dynest_model import DynestAudioCNN
 from origin_models import Note_pedal
 
 
@@ -29,7 +31,24 @@ class TranscriptionBase:
         self.segment_frames = int(round(cfg.feature.frames_per_second * cfg.feature.segment_seconds)) + 1 # 100*10 + 1 
         
         # Initialize and load model
-        self.model = eval(cfg.model.name)(frames_per_second=cfg.feature.frames_per_second, classes_num=cfg.feature.classes_num)
+        model_cls = eval(cfg.model.name)
+        sig = inspect.signature(model_cls.__init__)
+        params = [
+            p for p in list(sig.parameters.values())[1:]
+            if p.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+        ]
+        names = {p.name for p in params}
+        if {'frames_per_second', 'classes_num'}.issubset(names):
+            self.model = model_cls(
+                frames_per_second=cfg.feature.frames_per_second,
+                classes_num=cfg.feature.classes_num
+            )
+        else:
+            self.model = model_cls(cfg)
         if os.path.getsize(checkpoint_path) == 0:
             raise ValueError(f"Checkpoint file for Inference is empty: {checkpoint_path}")
 

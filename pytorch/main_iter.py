@@ -14,6 +14,7 @@ from utilities import create_folder, create_logging, RegressionPostProcessor
 
 # from models import Regress_onset_offset_frame_velocity_CRNN, Regress_pedal_CRNN
 from models import Single_Velocity_HPT, Dual_Velocity_HPT, Triple_Velocity_HPT
+from dynest_model import DynestAudioCNN
 # Single_Velo_Mamba1, Single_Velo_Mamba2
 
 from losses import get_loss_func
