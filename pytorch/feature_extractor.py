@@ -44,7 +44,7 @@ Common Defaults:
 
 Our Development:
 - Bark @16kHz: 
-    Fix 50% overlap ratio for the bark feature, same as the MATLAB 2007 & mosqito (ISO.532-1:2017) defaults.
+    Fix 50% overlap ratio for the bark feature, same as the MATLAB 2007 defaults.
     → sample_rate=16000, fft_size=256,  fps=125    (~50% ovarlap)
                          fft_size=512,  fps=62     (~50% ovarlap)
                          fft_size=1024, fps=31     (~50% ovarlap)
@@ -59,7 +59,6 @@ import numpy as np
 import pandas as pd
 import os, time, argparse, h5py
 from typing import Literal
-from mosqito.sq_metrics import loudness_zwtv
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 
@@ -80,12 +79,6 @@ def get_feature_extractor_and_bins(audio_feature, sample_rate, fft_size, frames_
     elif audio_feature == "ntot":
         feature_extractor = PsychoFeatureExtractor(sample_rate=sample_rate, fft_size=fft_size, frames_per_second=frames_per_second, db_max=96.0, return_mode="ntot")
         freq_bins = 1
-    elif audio_feature == "mosqito_sone":
-        feature_extractor = MoSQIToExtractor(sample_rate=sample_rate, mode="sone")
-        freq_bins = 1
-    elif audio_feature == "mosqito_bark":
-        feature_extractor = MoSQIToExtractor(sample_rate=sample_rate, mode="bark")
-        freq_bins = len(feature_extractor.freq_bins) if feature_extractor.freq_bins is not None else 24
     else:
         raise ValueError(f"Invalid audio_feature: {audio_feature}")
     return feature_extractor, freq_bins
@@ -241,39 +234,6 @@ class LogMelExtractor(nn.Module):
         elif self.return_mode == "mel": return mel
         else: raise ValueError(f"Invalid return_mode: {self.return_mode}")
 
-
-# --- Unified MoSQIToExtractor ---
-class MoSQIToExtractor(nn.Module):
-    """
-    Bark-band specific loudness extractor using MoSQITo loudness_zwtv.
-    mode = "sone": returns overall loudness (B, T, 1)
-    mode = "bark": returns specific loudness per bark-scale critical band (B, T, N)
-    """
-    def __init__(self, sample_rate=44100, mode="sone"):
-        super().__init__()
-        self.sample_rate = sample_rate
-        self.mode = mode
-        self.loudness_zwtv = loudness_zwtv
-        self.freq_bins = None
-
-    def forward(self, wav: torch.Tensor):
-        results, times = [], []
-        for waveform in wav.cpu().numpy():
-            overall, specific, freq, time = self.loudness_zwtv(signal=waveform, fs=self.sample_rate)
-            time = np.asarray(time).ravel()
-            if self.mode == "sone":
-                data = np.asarray(overall).ravel().reshape(-1, 1)
-            elif self.mode == "bark":
-                data = np.asarray(specific)
-                if self.freq_bins is None:
-                    self.freq_bins = freq
-            else:
-                raise ValueError(f"Invalid mode for MoSQIToExtractor: {self.mode}")
-            results.append(torch.tensor(data, dtype=torch.float32))
-            times.append(time)
-        return torch.stack(results), (self.freq_bins if self.mode=="bark" else None), times[0]
-
-
 # ---------- This __main__ block is for data visualization --------------------------
 # In practice, import and use the classes above directly to PyTorch Dataset or Model.
 def save_feature_csv(features, times, columns, output_csv_path):
@@ -294,7 +254,7 @@ def save_feature_plot(features, times, mode, output_png_path,
         i0,i1 = np.searchsorted(times,t0_,"left"), np.searchsorted(times,t1_,"right")
         features, times = features[i0:i1], times[i0:i1]
     unit = {"bark":"dB","sone":"sones","ntot":"sones",
-            "logmel":"dB","mel":"power","mosqito_sone":"sones"}.get(mode,"")
+            "logmel":"dB","mel":"power"}.get(mode,"")
     fig = plt.figure(figsize=figsize)
     f = features if features.ndim==2 else features.reshape(-1,1)
     if f.shape[1]==1:
@@ -315,7 +275,6 @@ def save_feature_plot(features, times, mode, output_png_path,
 def compare_sones_diff_methods(csv_files, titles):
     """
     - PyTorch (ours, origin BSSL, up to 24 Bark-bands)
-    - Paper2024 (used MoSQITo, high-res variant BSSL, up to 240 bins)
     - Matlab2007 (ma_sone, origin BSSL, up to 24 Bark-bands)
     - Paper2018 (used MATLAB2007, origin BSSL, up to 24 Bark-bands)
     """
@@ -333,12 +292,12 @@ def compare_sones_diff_methods(csv_files, titles):
     plt.tight_layout(); plt.show()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Extract Bark, (Log-)Mel, or MoSQITo Sones from .h5 waveform.")
+    parser = argparse.ArgumentParser(description="Extract Bark or (Log-)Mel features from .h5 waveform.")
     parser.add_argument("h5_input_path", type=str, help="Path to the input .h5 file")
     parser.add_argument("output_csv_path", type=str, help="Path to the output .csv file")
     parser.add_argument("--mode", type=str, default="sone",
-                        choices=["sone", "bark", "ntot", "logmel", "mel", "mosqito_sone"],
-                        help="Feature to extract: sone | ntot | logmel | mel | mosqito_sone")
+                        choices=["sone", "bark", "ntot", "logmel", "mel"],
+                        help="Feature to extract: sone | ntot | logmel | mel")
     parser.add_argument("--sample_rate", type=int, default=44100, help="Waveform sample rate (default: 44100)")
     parser.add_argument("--fft_size", type=int, default=1024, help="FFT size (default: 1024)")
     parser.add_argument("--frames_per_second", type=float, default=86, help="Frames per second for feature extraction")
@@ -358,12 +317,6 @@ if __name__ == "__main__":
         hop_duration = extractor.mel_spectrogram.hop_length / extractor.mel_spectrogram.sample_rate
         times = np.arange(features.shape[0]) * hop_duration
         columns = [f"mel_{i+1}" for i in range(features.shape[1])]
-    elif args.mode == "mosqito_sone":
-        extractor = MoSQIToExtractor(sample_rate=args.sample_rate, mode="sone")
-        features, _, times = extractor(wav_tensor)
-        features = features.squeeze(0).detach().cpu().numpy()
-        times = np.array(times)
-        columns = ["mosqito_sone"]
     else: # Our PyTorch implementaion of BSSL extractor
         extractor = PsychoFeatureExtractor(sample_rate=args.sample_rate, fft_size=args.fft_size, frames_per_second=args.frames_per_second, return_mode=args.mode)
         features = extractor(wav_tensor).squeeze(0).numpy().T if args.mode not in ["ntot"] else extractor(wav_tensor).squeeze(0).numpy()

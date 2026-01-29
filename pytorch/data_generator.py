@@ -3,8 +3,12 @@ import numpy as np
 import h5py
 import csv
 import librosa
-import sox
 import logging
+
+try:
+    import sox  # type: ignore
+except ImportError:
+    sox = None
 
 from utilities import (create_folder, int16_to_float32, traverse_folder, 
     pad_truncate_sequence, TargetProcessor, write_events_to_midi, 
@@ -253,10 +257,18 @@ class Augmentor(object):
         
         self.sample_rate = cfg.feature.sample_rate
         self.random_state = np.random.RandomState(cfg.exp.random_seed)
+        self._has_sox = sox is not None
+        if not self._has_sox:
+            logging.getLogger(__name__).warning(
+                "python-sox not available; disabling Augmentor effects. "
+                "Install `sox` and `pip install sox` to enable waveform augmentation."
+            )
 
     def augment(self, x):
-        clip_samples = len(x)
+        if not self._has_sox:
+            return x
 
+        clip_samples = len(x)
         logger = logging.getLogger('sox')
         logger.propagate = False
 
@@ -319,6 +331,10 @@ class Sampler(object):
 
         n = 0
         for hdf5_path in hdf5_paths:
+            base_name = os.path.basename(hdf5_path)
+            if (not hdf5_path.lower().endswith(('.h5', '.hdf5'))
+                or base_name.startswith('._')):
+                continue  # Skip non-HDF5 files and AppleDouble copies
             with h5py.File(hdf5_path, 'r') as hf:
                 if hf.attrs['split'].decode() == split:
                     audio_name = hdf5_path.split('/')[-1]

@@ -5,7 +5,7 @@ import logging
 import torch
 import torch.utils.data
 
-from torch_optimizer import Ranger
+# from torch_optimizer import Ranger
 from torch.optim import Adam
 
 from pytorch_utils import move_data_to_device
@@ -46,12 +46,13 @@ def train(cfg):
     # Arugments & parameters
     device = torch.device('cuda') if cfg.exp.cuda and torch.cuda.is_available() else torch.device('cpu')
     model = eval(cfg.model.name)(cfg).to(device)
-
+    optimizer = Adam(model.parameters(), lr=cfg.exp.learning_rate)
+    
     # Remove in formal
-    if cfg.model.name == 'Single_Velocity_HPT':
-        optimizer = Ranger(model.parameters(), lr=cfg.exp.learning_rate)
-    else:
-        optimizer = Adam(model.parameters(), lr=cfg.exp.learning_rate)
+    # if cfg.model.name == 'Single_Velocity_HPT':
+    #     optimizer = Ranger(model.parameters(), lr=cfg.exp.learning_rate)
+    # else:
+    #     optimizer = Adam(model.parameters(), lr=cfg.exp.learning_rate)
 
     # if cfg.exp.optim == "ranger":
     #     optimizer = Ranger(model.parameters(), lr=cfg.exp.learning_rate)
