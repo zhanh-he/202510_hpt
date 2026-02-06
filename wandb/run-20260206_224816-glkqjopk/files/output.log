@@ -1,0 +1,8 @@
+------------------------------------------------------------
+[1/1] Evaluating: 0_iterations.pth
+[Done] Time: 15.19 sec
+velocity_mae: 15.3810
+velocity_std: 10.4575
+velocity_recall: 0.3875
+
+[Saved] Summary in Wandb and CSV: /media/datadisk/home/22828187/zhanh/202510_hpt_data/workspaces/logs/DynestAudioCNN_smd.csv

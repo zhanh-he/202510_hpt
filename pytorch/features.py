@@ -167,7 +167,11 @@ def pack_smd_dataset_to_hdf5(cfg):
     audio_midi_pairs = {name: ext for name, ext in audio_midi_pairs}
     
      # Process each audio-MIDI pair
+    excluded = {"Beethoven_WoO080_001_20081107-SMD"}
     for audio_name, ext in audio_midi_pairs.items():
+        if audio_name in excluded:
+            logging.info(f"Skipping excluded SMD track: {audio_name}")
+            continue
         print(f"{count}: {audio_name}")
         audio_path = os.path.join(dataset_dir, f"{audio_name}.mp3")
         midi_path = os.path.join(dataset_dir, f"{audio_name}.mid")

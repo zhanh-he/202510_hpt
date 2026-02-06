@@ -12,10 +12,10 @@ from pytorch_utils import move_data_to_device
 from data_generator import Maestro_Dataset, SMD_Dataset, MAPS_Dataset, Augmentor, Sampler, EvalSampler, collate_fn
 from utilities import create_folder, create_logging, RegressionPostProcessor
 
-# from models import Regress_onset_offset_frame_velocity_CRNN, Regress_pedal_CRNN
-from models import Single_Velocity_HPT, Dual_Velocity_HPT, Triple_Velocity_HPT
-from dynest_model import DynestAudioCNN
-# Single_Velo_Mamba1, Single_Velo_Mamba2
+# from model_HPT import Regress_onset_offset_frame_velocity_CRNN, Regress_pedal_CRNN
+from model_HPT import Single_Velocity_HPT, Dual_Velocity_HPT, Triple_Velocity_HPT
+from model_FilmUnet import FiLMUNetPretrained
+from model_DynEst import DynestAudioCNN
 
 from losses import get_loss_func
 from evaluate import SegmentEvaluator
@@ -38,6 +38,32 @@ def init_wandb(cfg, wandb_run_id):
         resume="must" if wandb_run_id else "allow",
         config=OmegaConf.to_container(cfg, resolve=True)
     )
+
+def _write_training_stats(cfg, checkpoints_dir, model_name):
+    """Persist a short config snapshot next to checkpoints."""
+    stats_path = os.path.join(checkpoints_dir, "training_stats.txt")
+    file_name = getattr(cfg.wandb, "name", None) or model_name
+    condition_inputs = [getattr(cfg.model, "input2", None), getattr(cfg.model, "input3", None)]
+    condition_check = any(condition_inputs)
+    condition_type = next((c for c in condition_inputs if c), "none")
+    condition_net = getattr(cfg.model, "condition_net", "N/A")
+
+    lines = [
+        f"file name           :{file_name}",
+        f"dev_env             :{getattr(cfg.exp, 'dev_env', 'local')}",
+        f"condition_check     :{condition_check}",
+        f"condition_net       :{condition_net}",
+        f"loss_type           :{cfg.exp.loss_type}",
+        f"condition_type      :{condition_type}",
+        f"batch_size          :{cfg.exp.batch_size}",
+        f"hop_seconds         :{cfg.feature.hop_seconds}",
+        f"segment_seconds     :{cfg.feature.segment_seconds}",
+        f"frames_per_second   :{cfg.feature.frames_per_second}",
+        f"feature type        :{cfg.feature.audio_feature}",
+    ]
+
+    with open(stats_path, "w") as f:
+        f.write("\n".join(lines))
 
 def train(cfg):
     """
@@ -68,6 +94,7 @@ def train(cfg):
     # Create logging and checkpoint dir
     create_folder(checkpoints_dir)
     create_folder(logs_dir)
+    _write_training_stats(cfg, checkpoints_dir, model_name)
     create_logging(logs_dir, filemode='w')
     logging.info(cfg)
     logging.info(f"Using {device}.")
@@ -75,17 +102,32 @@ def train(cfg):
     # Resume training if applicable
     start_iteration = 0
     wandb_run_id = None
+    resume_sampler_state = None
     if cfg.exp.resume_iteration > 0:
-        checkpoint_path = os.path.join(checkpoints_dir, f'{cfg.exp.resume_iteration}_iteration.pth')
-        if os.path.exists(checkpoint_path):
-            logging.info(f"Loading checkpoint {checkpoint_path} from iteration {cfg.exp.resume_iteration}")
-            checkpoint = torch.load(checkpoint_path)
-            model.load_state_dict(checkpoint['model'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            start_iteration = checkpoint['iteration']
-            wandb_run_id = checkpoint.get('wandb_run_id')
+        state_path = os.path.join(checkpoints_dir, f'{cfg.exp.resume_iteration}_iterations.pth')
+        resume_meta_path = os.path.join(checkpoints_dir, f'{cfg.exp.resume_iteration}_resume.pth')
+        if os.path.exists(state_path):
+            logging.info(f"Loading checkpoint {state_path} from iteration {cfg.exp.resume_iteration}")
+            model_state = torch.load(state_path)
+            if isinstance(model_state, dict) and 'model' in model_state and 'optimizer' in model_state:
+                # Legacy combined checkpoint
+                checkpoint = model_state
+                model.load_state_dict(checkpoint['model'])
+                optimizer.load_state_dict(checkpoint['optimizer'])
+                start_iteration = checkpoint['iteration']
+                wandb_run_id = checkpoint.get('wandb_run_id')
+                resume_sampler_state = checkpoint.get('sampler')
+            else:
+                if not os.path.exists(resume_meta_path):
+                    raise FileNotFoundError(f"Missing resume metadata: {resume_meta_path}")
+                checkpoint = torch.load(resume_meta_path)
+                model.load_state_dict(model_state)
+                optimizer.load_state_dict(checkpoint['optimizer'])
+                start_iteration = checkpoint['iteration']
+                wandb_run_id = checkpoint.get('wandb_run_id')
+                resume_sampler_state = checkpoint.get('sampler')
         else:
-            logging.warning(f"Checkpoint {checkpoint_path} not found. Starting from scratch.")
+            logging.warning(f"Checkpoint {state_path} not found. Starting from scratch.")
 
     # Initialize WandB after potentially loading run_id
     init_wandb(cfg, wandb_run_id)
@@ -104,6 +146,8 @@ def train(cfg):
     # test_dataset = dataset_classes[cfg.dataset.test_set](cfg)
     
     train_sampler = get_sampler(cfg, purpose='train', split='train', is_eval=None)
+    if resume_sampler_state:
+        train_sampler.load_state_dict(resume_sampler_state)
 
     train_loader = torch.utils.data.DataLoader(
         dataset=train_dataset,
@@ -212,16 +256,17 @@ def train(cfg):
             train_bgn_time = time.time()
 
             # Save model
-            checkpoint = {
-                'iteration': iteration, 
-                'model': model.state_dict(), 
+            checkpoint_path = os.path.join(checkpoints_dir, f'{iteration}_iterations.pth')
+            resume_meta_path = os.path.join(checkpoints_dir, f'{iteration}_resume.pth')
+            torch.save(model.state_dict(), checkpoint_path)
+            resume_payload = {
+                'iteration': iteration,
                 'sampler': train_sampler.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'wandb_run_id': wandb.run.id,
             }
-            checkpoint_path = os.path.join(checkpoints_dir, f'{iteration}_iteration.pth')
-            torch.save(checkpoint, checkpoint_path)
-            logging.info(f'Model saved to {checkpoint_path}')
+            torch.save(resume_payload, resume_meta_path)
+            logging.info(f'Model saved to {checkpoint_path} (state) and {resume_meta_path} (resume)')
 
         # Stop learning when reaching end
         if iteration == cfg.exp.total_iteration:

@@ -1,248 +1,394 @@
+import csv
 import os
-os.environ["WANDB_SILENT"] = "true"
 import sys
-from hydra import initialize, compose
-import pickle
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
+
 import h5py
-import mir_eval
 import numpy as np
-import time
-from concurrent.futures.process import ProcessPoolExecutor
-from evaluate import prepare_tensor, cal_mae, cal_std
-from utilities import traverse_folder, get_filename, get_model_name, note_to_freq, OnsetsFramesPostProcessor
+from hydra import compose, initialize
+from sklearn.metrics import (
+    average_precision_score,
+    f1_score,
+    precision_recall_fscore_support,
+    precision_score,
+    recall_score,
+)
+from tqdm import tqdm
 
-import wandb
-import pandas as pd
-import gc
-# Filter out the FutureWarning
-import warnings
-warnings.filterwarnings("ignore", message="`rcond` parameter will change")
+from inference import VeloTranscription, _apply_model_defaults
+from utilities import (
+    TargetProcessor,
+    create_folder,
+    get_model_name,
+    int16_to_float32,
+    resolve_hdf5_dir,
+    traverse_folder,
+)
 
 
-class ScoreCalculator(object):
-    def __init__(self, cfg):
-        """Evaluate piano transcription metrics of the post processed - pre-calculated system outputs."""
-        self.cfg = cfg
-        hdf5s_dir = os.path.join(cfg.exp.workspace, "hdf5s", cfg.dataset.test_set)
-        _, self.hdf5_paths = traverse_folder(hdf5s_dir)
+def note_level_l1_per_window(
+    output_segment: Dict[str, np.ndarray],
+    target_segment: Dict[str, np.ndarray],
+) -> Tuple[np.ndarray, int]:
+    """Kim et al. note-level L1 error for a single segment."""
+    segment_error = np.empty((0, 88), float)
+    num_notes = 0
+    frames = min(
+        output_segment["velocity_output"].shape[0],
+        target_segment["velocity_roll"].shape[0],
+    )
 
-        if cfg.model.type == "velo":
-            # Prepare model name and probabilities dir
-            model_name = get_model_name(cfg)
-            self.probs_dir = os.path.join(cfg.exp.workspace, f"probs_{cfg.model.type}", cfg.dataset.test_set, model_name, f"{cfg.exp.ckpt_iteration}_iteration")
-        
-        elif cfg.model.type == "notes":
-            model_name = "Original HPT"
-            self.probs_dir = os.path.join(cfg.exp.workspace, f"probs_{cfg.model.type}", cfg.dataset.test_set)
+    for nth_frame in range(frames):
+        gt_onset_frame = target_segment["onset_roll"][nth_frame]
+        if np.count_nonzero(gt_onset_frame) == 0:
+            continue
 
-    
-    def metrics(self):
-        """Calculate metrics of all songs."""
-        list_args = [
-            [n, hdf5_path]
-            for n, hdf5_path in enumerate(self.hdf5_paths) # e.g.[0, 'xx.h5']
-            if h5py.File(hdf5_path, 'r').attrs['split'].decode() == 'test'
-        ] 
-        if self.cfg.exp.debug:
-            results = [self.calculate_score_per_song(arg) for arg in list_args]
-        else: # Calculate metrics in parallel
-            with ProcessPoolExecutor(max_workers=self.cfg.exp.num_workers) as executor:
-                results = executor.map(self.calculate_score_per_song, list_args)
-        stats_list = list(results)
-        stats_dict = {key: [e[key] for e in stats_list if key in e.keys()] for key in stats_list[0].keys()}
-        return stats_dict
-    
-    def calculate_score_per_song(self, args):
-        """Calculate score per song with GroundTruth
-        Args:
-          args: [n, hdf5_path]
-        """
-        # Load pre-calculated outputs & ground truths from note_path | velocity_output from velo_path
-        hdf5_path = args[1]
-        prob_path = os.path.join(self.probs_dir, f"{get_filename(hdf5_path)}.pkl")
-        total_dict = pickle.load(open(prob_path, 'rb'))
-        
-        # Prepare Est Velocity + GT Notes
-        if cfg.model.type == "velo":
-            output_dict = {
-                'velocity_output': total_dict['velocity_output'],
-                'frame_output': total_dict['frame_roll'],
-                'onset_output': total_dict['onset_roll'],
-                'offset_output': total_dict['offset_roll']
+        pred_frame = output_segment["velocity_output"][nth_frame]
+        gt_frame = target_segment["velocity_roll"][nth_frame]
+        pred_onset = np.multiply(pred_frame, gt_onset_frame) * 128.0
+        gt_onset = np.multiply(gt_frame, gt_onset_frame)
+        note_error = np.abs(pred_onset - gt_onset).reshape(1, -1)
+
+        num_notes += int(np.count_nonzero(gt_onset_frame))
+        segment_error = np.append(segment_error, note_error, axis=0)
+
+    return segment_error, num_notes
+
+
+def classification_error(score: np.ndarray, estimation: np.ndarray) -> Tuple[float, ...]:
+    """Binary frame classification metrics."""
+    score_bin = score.copy()
+    estimation_bin = estimation.copy()
+
+    score_bin[score_bin > 0] = 1
+    estimation_bin[estimation_bin > 0.0001] = 1
+    estimation_bin[estimation_bin <= 0.0001] = 0
+
+    precision_ave = average_precision_score(score_bin.flatten(), estimation_bin.flatten())
+    f1 = f1_score(score_bin.flatten(), estimation_bin.flatten(), average="macro")
+    precision = precision_score(score_bin.flatten(), estimation_bin.flatten(), average="macro")
+    recall = recall_score(score_bin.flatten(), estimation_bin.flatten(), average="macro")
+    prfs = precision_recall_fscore_support(
+        score_bin.flatten(), estimation_bin.flatten(), zero_division=0
+    )
+    frame_precision = prfs[0][1]
+    frame_recall = prfs[1][1]
+    frame_f1 = prfs[2][1]
+
+    return precision_ave, f1, precision, recall, frame_precision, frame_recall, frame_f1
+
+
+def num_simultaneous_notes(note_profile: Dict[str, np.ndarray], score: np.ndarray) -> int:
+    start, end = note_profile["duration"]
+    sim_note_count = 0
+    for key in range(score.shape[0]):
+        sim_note = score[key][start:end]
+        if np.sum(sim_note) > 0:
+            sim_note_count += 1
+    return sim_note_count
+
+
+def pedal_check(note_profile: Dict[str, np.ndarray], pedal: np.ndarray) -> bool:
+    start, end = note_profile["duration"]
+    return bool(np.sum(pedal[start:end]) > 0)
+
+
+def get_midi_sound_profile(midi_vel_roll: np.ndarray) -> List[Dict[str, np.ndarray]]:
+    sound_profile: List[Dict[str, np.ndarray]] = []
+    for pitch, key in enumerate(midi_vel_roll):
+        iszero = np.concatenate(([0], np.equal(key, 0).astype(np.int8), [0]))
+        absdiff = np.abs(np.diff(iszero))
+        ranges = np.where(absdiff == 1)[0]
+        if ranges.size <= 2:
+            continue
+        temp = np.delete(ranges, [0, -1])
+        sound_durations = temp.reshape(-1, 2)
+        for duration in sound_durations:
+            vel = midi_vel_roll[pitch, duration[0]]
+            sound_profile.append({"pitch": pitch, "velocity": vel, "duration": duration})
+    return sound_profile
+
+
+def gt_to_note_list(
+    output_dict_list: Sequence[Dict[str, np.ndarray]],
+    target_list: Sequence[Dict[str, np.ndarray]],
+) -> Tuple[float, float, List[Dict[str, np.ndarray]], float, float, float, float, float, float, float]:
+    """Kim et al. per-note error profile."""
+    score = np.empty((0, 88), float)
+    pedal = np.empty((0,), float)
+    estimation = np.empty((0, 88), float)
+
+    for target_segment, output_segment in zip(target_list, output_dict_list):
+        frames = target_segment["velocity_roll"].shape[0]
+        for nth_frame in range(frames):
+            gt_velframe = target_segment["velocity_roll"][nth_frame]
+            gt_pedal = target_segment["pedal_frame_roll"][nth_frame]
+            output_vel_frame = output_segment["velocity_output"][nth_frame]
+
+            score = np.append(score, gt_velframe[None, :], axis=0)
+            pedal = np.append(pedal, gt_pedal)
+            estimation = np.append(estimation, output_vel_frame[None, :], axis=0)
+
+    if score.size == 0:
+        return (0.0, 0.0, [], 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    precision_ave, f1, precision, recall, frame_precision, frame_recall, frame_f1 = (
+        classification_error(score.copy(), estimation.copy())
+    )
+
+    score = np.transpose(score)
+    estimation = np.transpose(estimation)
+
+    score_sound_profile = get_midi_sound_profile(score)
+    error_profile: List[Dict[str, np.ndarray]] = []
+    accum_error: List[float] = []
+
+    for note_profile in score_sound_profile:
+        start, end = note_profile["duration"]
+        vel_est = estimation[note_profile["pitch"]][start:end].copy()
+        vel_est[vel_est <= 0.0001] = 0
+
+        classification_check = bool(np.sum(vel_est) > 0)
+        max_estimation = float(np.max(vel_est) * 128.0) if vel_est.size else 0.0
+        notelevel_error = abs(max_estimation - float(note_profile["velocity"]))
+        sim_note_count = num_simultaneous_notes(note_profile, score)
+        pedal_onoff = pedal_check(note_profile, pedal)
+
+        error_profile.append(
+            {
+                "pitch": note_profile["pitch"],
+                "duration": (int(start), int(end)),
+                "note_error": notelevel_error,
+                "ground_truth": float(note_profile["velocity"]),
+                "estimation": max_estimation,
+                "pedal_check": pedal_onoff,
+                "simultaneous_notes": sim_note_count,
+                "classification_check": classification_check,
             }
-
-        # Prepare Est Velocity + Est Notes
-        elif cfg.model.type == "notes": 
-            output_dict = {
-                'velocity_output': total_dict['velocity_output'],
-                'frame_output': total_dict['frame_output'],
-                'onset_output': total_dict['onset_output'],
-                'offset_output': total_dict['offset_output']
-            }
-        
-        post_processor = OnsetsFramesPostProcessor(self.cfg)
-        note_matched_vels = post_processor.output_dict_to_detected_notes(output_dict)
-
-        # Process ground truth notes
-        est_on_offs =      note_matched_vels[:, 0:2]
-        est_midi_notes =   note_matched_vels[:, 2]
-        est_matched_vels = note_matched_vels[:, 3] * self.cfg.feature.velocity_scale
-
-        # Ensure the offsets are later than onsets
-        interval_check = est_on_offs[:, 1] <= est_on_offs[:, 0]
-        abnormal_index = np.nonzero(interval_check)[0]
-        est_on_offs[abnormal_index, 1] = est_on_offs[abnormal_index, 0] * (1 + 1e-6)
-
-        return_dict = {}
-
-        # Calculate frame metric
-        if self.cfg.score.evaluate_frame:
-            mask = total_dict['onset_roll']
-            y_pred = output_dict['velocity_output'] * 128
-            y_true = total_dict['velocity_roll'] # Normalised [0,127] to (0, 0.99)
-            
-            y_pred, y_true, mask = prepare_tensor(y_pred, y_true, mask)
-            return_dict['velocity_mae'] = cal_mae(y_pred, y_true, mask)
-            return_dict['velocity_std'] = cal_std(y_pred, y_true, mask)
-            
-            # mask = mask[0: y_true.shape[0], :]
-            # y_pred = y_pred[0: y_true.shape[0], :]
-            # y_true = y_true[0: y_pred.shape[0], :]
-            
-            # y_pred_tensor = torch.from_numpy(y_pred)
-            # y_true_tensor = torch.from_numpy(y_true)
-            # mask_tensor = torch.from_numpy(mask)
-
-            # return_dict['velocity_mae'] = cal_mae(output=y_pred_tensor, target=y_true_tensor, mask=mask_tensor)
-            # return_dict['velocity_std'] = cal_std(output=y_pred_tensor, target=y_true_tensor, mask=mask_tensor)
-
-        # Calculate note-level metrics (onset + frame + offset + velocity)
-        if self.cfg.score.evaluate_velocity:
-            ref_on_off_pairs = total_dict['ref_on_off_pairs']
-            ref_midi_notes = total_dict['ref_midi_notes']
-            _, note_recall_4, _, _ = (
-                mir_eval.transcription_velocity.precision_recall_f1_overlap(
-                    ref_intervals=ref_on_off_pairs,
-                    ref_pitches=note_to_freq(ref_midi_notes),
-                    ref_velocities=total_dict['ref_velocity'],
-                    est_intervals=est_on_offs,
-                    est_pitches=note_to_freq(est_midi_notes),
-                    est_velocities=est_matched_vels,
-                    # Comment out the following to use default
-                    onset_tolerance=self.cfg.score.onset_tolerance,
-                    offset_ratio=self.cfg.score.offset_ratio,
-                    offset_min_tolerance=self.cfg.score.offset_min_tolerance
-                    ))
-            # print('Note f1: {:.3f}, {:.3f}, {:.3f}'.format(note_f1_2, note_f1_3, note_f1_4))
-            return_dict.update({'velocity_recall': note_recall_4})
-
-        return return_dict
-
-
-if __name__ == '__main__':
-    initialize(config_path="./", job_name="eval", version_base=None)
-    cfg = compose(config_name="config", overrides=sys.argv[1:])
-    
-    model_name = get_model_name(cfg) if cfg.model.type == "velo" else "Original HPT"
-
-    print("=" * 80)
-    print(f"Evaluation Mode : {cfg.exp.run_infer.upper()}")
-    print(f"Model Name      : {model_name}")
-    print(f"Test Set        : {cfg.dataset.test_set}")
-    print(f"Using device    : cpu")
-    print("=" * 80)
-
-    if cfg.exp.run_infer == "notes":
-        print(f"Original HPT: Est notes match Est velo")
-        t1 = time.time()
-        # Calculate score on all HDF5 file in the test set
-        score_calculator = ScoreCalculator(cfg)
-        stats_dict = score_calculator.metrics()
-        # Display the results
-        print(f"[Done] Score Calculation Time: {time.time() - t1:.2f} sec")
-        print("=" * 80)
-        for key, values in stats_dict.items():
-            print(f"{key}: {np.mean(values):.4f}")
-
-    elif cfg.exp.run_infer == "single":
-        print(f"Checkpoint      : {cfg.exp.ckpt_iteration}_iteration.pth")
-        t1 = time.time()
-        # Calculate score on all HDF5 file in the test set
-        score_calculator = ScoreCalculator(cfg)
-        stats_dict = score_calculator.metrics()
-        # Display the results
-        print(f"\n[Done] Score Calculation Time: {time.time() - t1:.2f} sec")
-        print(f"\n===== {model_name}, iter={cfg.exp.ckpt_iteration} =====")
-        for key, values in stats_dict.items():
-            print(f"{key}: {np.mean(values):.4f}")
-    
-    elif cfg.exp.run_infer == "multi":
-        ckpt_dir = os.path.join(cfg.exp.workspace, "checkpoints", model_name)
-        ckpt_files = sorted([f for f in os.listdir(ckpt_dir) if f.endswith("_iteration.pth")],
-                            key=lambda x: int(x.replace("_iteration.pth", "")))
-        print(f"Found {len(ckpt_files)} checkpoints in {ckpt_dir}")
-
-        wandb.init(
-            project=cfg.wandb.project, 
-            name=f"eval_{cfg.dataset.test_set}_{model_name}", 
-            config={
-                "model_name": cfg.model.name,
-                "input2": cfg.model.input2,
-                "input3": cfg.model.input3,
-                "dataset": cfg.dataset.test_set,
-                "ckpt": cfg.exp.ckpt_iteration,
-            },
-            # settings=wandb.Settings(console='off'),
         )
-        records = []
+        accum_error.append(notelevel_error)
 
-        for idx, ckpt_file in enumerate(ckpt_files):
-            ckpt_iteration = ckpt_file.replace("_iteration.pth", "")
-            cfg.exp.ckpt_iteration = ckpt_iteration
+    frame_max_error = float(np.mean(accum_error)) if accum_error else 0.0
+    std_max_error = float(np.std(accum_error)) if accum_error else 0.0
 
-            print("-" * 60) # "\n" + 
-            print(f"[{idx+1}/{len(ckpt_files)}] Evaluating: {ckpt_iteration}_iteration.pth")
-            # print("-" * 60)
-
-            t1 = time.time()
-            score_calculator = ScoreCalculator(cfg)
-            stats_dict = score_calculator.metrics()
-
-            # Remove in formal
-            if cfg.model.name == "Single_Velocity_HPT":
-                stats_dict["velocity_mae"] = [v + 0.7 for v in stats_dict["velocity_mae"]]
-                stats_dict["velocity_std"] = [v + 0.7 for v in stats_dict["velocity_std"]]
-                stats_dict["velocity_recall"] = [v - 0.028 for v in stats_dict["velocity_recall"]]
-
-            elapsed = time.time() - t1
-            print(f"[Done] Time: {elapsed:.2f} sec")
+    return (
+        frame_max_error,
+        std_max_error,
+        error_profile,
+        precision_ave,
+        f1,
+        precision,
+        recall,
+        frame_precision,
+        frame_recall,
+        frame_f1,
+    )
 
 
-            # print results & log
-            eval_results = {'iteration': int(ckpt_iteration)}
-            for key, values in stats_dict.items():
-                val = float(np.mean(values))
-                eval_results[key] = val
-                print(f"{key}: {val:.4f}")
+def eval_from_list(
+    output_dict_list: Sequence[Dict[str, np.ndarray]],
+    target_dict_list: Sequence[Dict[str, np.ndarray]],
+) -> Tuple[float, float]:
+    """Kim et al. onset-only evaluation."""
+    score_error = np.empty((0, 88), float)
+    num_note = 0
+    for output_dict_segmentseconds, target_dict_segmentseconds in zip(
+        output_dict_list, target_dict_list
+    ):
+        segment_error, num_onset = note_level_l1_per_window(
+            output_dict_segmentseconds, target_dict_segmentseconds
+        )
+        score_error = np.append(score_error, segment_error, axis=0)
+        num_note += num_onset
 
-            wandb.log(eval_results, step=idx)
-            records.append(eval_results)
+    if num_note == 0:
+        return 0.0, 0.0
 
-            # Release memory
-            del score_calculator
-            del stats_dict
-            gc.collect()
-        
-        # save CSV
-        df = pd.DataFrame(records)
-        csv_path = os.path.join(cfg.exp.workspace, "logs", f"{model_name}_{cfg.dataset.test_set}.csv")
-        df.to_csv(csv_path, index=False)
-        print(f"\n[Saved] Summary in Wandb and CSV: {csv_path}")
+    mean_error = float(np.sum(score_error) / num_note)
+    non_zero = score_error[score_error != 0]
+    std_error = float(non_zero.std()) if non_zero.size else 0.0
+    return mean_error, std_error
 
-        wandb.finish()
-        print("=" * 80)
-        print("All checkpoint scores completed.")
-        print("=" * 80)
 
-    else:
-        raise ValueError("cfg.exp.run_infer must be 'single' or 'multi'")
+class KimStyleEvaluator:
+    """Run HPT inference and compute Kim et al. evaluation metrics."""
+
+    CSV_FIELDS = [
+        "test_h5",
+        "frame_max_error",
+        "std_max_error",
+        "average_precision_score",
+        "f1_score",
+        "precision_score",
+        "recall_score",
+        "precision_support",
+        "recall_support",
+        "f1_support",
+        "onset_mean_error",
+        "onset_std_error",
+    ]
+
+    def __init__(self, cfg):
+        if cfg.model.type != "velo":
+            raise ValueError("Kim-style evaluation is defined for velocity models only.")
+        if not cfg.exp.ckpt_iteration:
+            raise ValueError("cfg.exp.ckpt_iteration must be set for evaluation.")
+
+        self.cfg = cfg
+        self.model_name = get_model_name(cfg)
+        self.ckpt_iteration = str(cfg.exp.ckpt_iteration)
+        checkpoint_path = Path(cfg.exp.workspace) / "checkpoints" / self.model_name / f"{self.ckpt_iteration}_iterations.pth"
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+        self.transcriptor = VeloTranscription(str(checkpoint_path), cfg)
+
+        hdf5_dir = resolve_hdf5_dir(cfg.exp.workspace, cfg.dataset.test_set, cfg.feature.sample_rate)
+        _, self.hdf5_paths = traverse_folder(hdf5_dir)
+
+        self.results_dir = (
+            Path(cfg.exp.workspace)
+            / "kim_eval"
+            / cfg.dataset.test_set
+            / self.model_name
+            / f"{self.ckpt_iteration}_iterations"
+        )
+        self.error_dict_dir = self.results_dir / "error_dict"
+        create_folder(str(self.error_dict_dir))
+
+    def _prepare_inputs(self, target_dict: Dict[str, np.ndarray]) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        target_dict["exframe_roll"] = target_dict["frame_roll"] * (1 - target_dict["onset_roll"])
+
+        input2 = target_dict.get(f"{self.cfg.model.input2}_roll") if self.cfg.model.input2 else None
+        input3 = target_dict.get(f"{self.cfg.model.input3}_roll") if self.cfg.model.input3 else None
+        return input2, input3
+
+    def _process_file(self, hdf5_path: str) -> Optional[Dict[str, np.ndarray]]:
+        with h5py.File(hdf5_path, "r") as hf:
+            if hf.attrs["split"].decode() != "test":
+                return None
+            audio = int16_to_float32(hf["waveform"][:])
+            midi_events = [e.decode() for e in hf["midi_event"][:]]
+            midi_events_time = hf["midi_event_time"][:]
+
+        segment_seconds = len(audio) / self.cfg.feature.sample_rate
+        target_processor = TargetProcessor(segment_seconds=segment_seconds, cfg=self.cfg)
+        target_dict, _, _ = target_processor.process(
+            start_time=0, midi_events_time=midi_events_time, midi_events=midi_events, extend_pedal=True
+        )
+
+        input2, input3 = self._prepare_inputs(target_dict)
+        transcribed = self.transcriptor.transcribe(audio, input2, input3, midi_path=None)
+        output_dict = transcribed["output_dict"]
+
+        align_len = min(output_dict["velocity_output"].shape[0], target_dict["velocity_roll"].shape[0])
+
+        output_entry = {
+            "velocity_output": output_dict["velocity_output"][:align_len],
+        }
+        target_entry = {
+            "velocity_roll": target_dict["velocity_roll"][:align_len],
+            "frame_roll": target_dict["frame_roll"][:align_len],
+            "onset_roll": target_dict["onset_roll"][:align_len],
+            "pedal_frame_roll": target_dict["pedal_frame_roll"][:align_len],
+        }
+
+        output_dict_list = [output_entry]
+        target_dict_list = [target_entry]
+
+        (
+            frame_max_error,
+            std_max_error,
+            error_profile,
+            precision_ave,
+            f1,
+            precision,
+            recall,
+            frame_precision,
+            frame_recall,
+            frame_f1,
+        ) = gt_to_note_list(output_dict_list, target_dict_list)
+
+        onset_mean_error, onset_std_error = eval_from_list(output_dict_list, target_dict_list)
+
+        return {
+            "audio_name": Path(hdf5_path).name,
+            "frame_max_error": frame_max_error,
+            "std_max_error": std_max_error,
+            "average_precision_score": precision_ave,
+            "f1_score": f1,
+            "precision_score": precision,
+            "recall_score": recall,
+            "precision_support": frame_precision,
+            "recall_support": frame_recall,
+            "f1_support": frame_f1,
+            "onset_mean_error": onset_mean_error,
+            "onset_std_error": onset_std_error,
+            "error_profile": np.array(error_profile, dtype=object),
+        }
+
+    def run(self) -> Dict[str, List[float]]:
+        csv_path = self.results_dir / f"{self.model_name}_{self.cfg.dataset.test_set}_kim.csv"
+        create_folder(str(self.results_dir))
+
+        aggregated: Dict[str, List[float]] = {field: [] for field in self.CSV_FIELDS if field != "test_h5"}
+        processed = 0
+
+        with open(csv_path, "w", newline="") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(self.CSV_FIELDS)
+
+            progress = tqdm(sorted(self.hdf5_paths), desc="Kim Eval", unit="file", ncols=80)
+            for hdf5_path in progress:
+                metrics = self._process_file(hdf5_path)
+                if not metrics:
+                    continue
+
+                error_profile = metrics.pop("error_profile")
+                audio_name = metrics["audio_name"]
+                error_dict_path = self.error_dict_dir / f"{Path(audio_name).stem}_aligned.npy"
+                np.save(error_dict_path, error_profile, allow_pickle=True)
+
+                row = [audio_name] + [metrics[field] for field in self.CSV_FIELDS[1:]]
+                writer.writerow(row)
+
+                for field in aggregated.keys():
+                    aggregated[field].append(float(metrics[field]))
+
+                processed += 1
+                avg_frame_err = np.mean(aggregated["frame_max_error"])
+                progress.set_postfix({"frame_err": f"{avg_frame_err:.2f}"}, refresh=False)
+
+        if not processed:
+            return {}
+
+        return aggregated
+
+
+def main() -> None:
+    initialize(config_path="./", job_name="kim_eval", version_base=None)
+    cfg = compose(config_name="config", overrides=sys.argv[1:])
+    _apply_model_defaults(cfg)
+
+    print("=" * 80)
+    print("Evaluation Mode : Kim et al.")
+    print(f"Model Name      : {get_model_name(cfg)}")
+    print(f"Test Set        : {cfg.dataset.test_set}")
+    print("=" * 80)
+
+    evaluator = KimStyleEvaluator(cfg)
+    stats_dict = evaluator.run()
+
+    if not stats_dict:
+        print("No test files processed.")
+        return
+
+    print("\n===== Kim-style Average Metrics =====")
+    for key, values in stats_dict.items():
+        mean_value = float(np.mean(values))
+        print(f"{key}: {mean_value:.4f}")
+
+
+if __name__ == "__main__":
+    main()

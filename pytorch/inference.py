@@ -12,16 +12,14 @@ from tqdm import tqdm
 from utilities import (
     create_folder, get_filename, traverse_folder, get_model_name,
     write_events_to_midi, int16_to_float32,
-    TargetProcessor, RegressionPostProcessor, OnsetsFramesPostProcessor, 
+    TargetProcessor, RegressionPostProcessor, OnsetsFramesPostProcessor,
+    resolve_hdf5_dir,
 )
 from pytorch_utils import move_data_to_device, forward, forward_velo
-from models import (
-    Single_Velocity_HPT, Dual_Velocity_HPT, Triple_Velocity_HPT,
-    Single_Velo_Mamba1, 
-)
-from dynest_model import DynestAudioCNN
-from origin_models import Note_pedal
-
+from model_HPT import Single_Velocity_HPT, Dual_Velocity_HPT, Triple_Velocity_HPT
+from model_DynEst import DynestAudioCNN
+from model_orignHPT import Note_pedal
+from model_FilmUnet import FiLMUNetPretrained
 
 class TranscriptionBase:
     def __init__(self, checkpoint_path, cfg):
@@ -53,7 +51,28 @@ class TranscriptionBase:
             raise ValueError(f"Checkpoint file for Inference is empty: {checkpoint_path}")
 
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        self.model.load_state_dict(checkpoint['model'], strict=False)
+        state_dict = checkpoint['model'] if isinstance(checkpoint, dict) and 'model' in checkpoint else checkpoint
+        if not isinstance(state_dict, dict):
+            raise RuntimeError(f"Unsupported checkpoint format: {checkpoint_path}")
+
+        def _strip_prefix(state, prefix):
+            keys = list(state.keys())
+            if keys and all(k.startswith(prefix) for k in keys):
+                return {k[len(prefix):]: v for k, v in state.items()}
+            return state
+
+        state_dict = _strip_prefix(state_dict, "module.")
+
+        target_model = self.model
+        if isinstance(self.model, FiLMUNetPretrained):
+            inner_state = state_dict
+            if any(k.startswith("model.") for k in inner_state.keys()):
+                inner_state = {k.replace("model.", "", 1): v for k, v in inner_state.items()}
+            inner_state = self.model._prepare_state_dict(inner_state)
+            target_model = self.model.model
+            state_dict = inner_state
+
+        target_model.load_state_dict(state_dict, strict=True)
         self.model.to(self.device)
 
     def enframe(self, x, is_audio=True):
@@ -88,13 +107,16 @@ class TranscriptionBase:
         
         x = x[:, :-1, :]
         segment_samples = x.shape[1]
-        assert segment_samples % 4 == 0
+        quarter = max(1, segment_samples // 4)
+        three_quarters = segment_samples - quarter
+        if three_quarters <= quarter:
+            return np.concatenate(x, axis=0)
         """Remove an extra frame in the end of each segment caused by the
         'center=True' argument when calculating spectrogram."""
         y = [
-            x[0, :int(segment_samples * 0.75)],
-            *[x[i, int(segment_samples * 0.25):int(segment_samples * 0.75)] for i in range(1, x.shape[0] - 1)],
-            x[-1, int(segment_samples * 0.25):]
+            x[0, :three_quarters],
+            *[x[i, quarter:three_quarters] for i in range(1, x.shape[0] - 1)],
+            x[-1, quarter:]
         ]
         return np.concatenate(y, axis=0)
 
@@ -128,7 +150,6 @@ class VeloTranscription(TranscriptionBase):
             # We expect audio & extra iput segments same amount, if not, pad input until being same
             if aux_segments_num != audio_segments_num:
                 aux_segments_num = audio_segments_num
-                print("Warning: Mismatch between audio and auxiliary input segments. Padding auxiliary input.")
             
             pad_aux_len = aux_segments_num * self.segment_frames - aux_len
             pad_aux = np.pad(aux_input, ((0, pad_aux_len), (0, 0)), mode='constant')
@@ -212,14 +233,14 @@ def infer(cfg):
     """Perform inference for notes or velocity, depending on cfg.model.type."""
     # Prepare model name and checkpoint path
     model_name = get_model_name(cfg)
-    checkpoint_path = os.path.join(cfg.exp.workspace, "checkpoints", model_name, f"{cfg.exp.ckpt_iteration}_iteration.pth")
+    checkpoint_path = os.path.join(cfg.exp.workspace, "checkpoints", model_name, f"{cfg.exp.ckpt_iteration}_iterations.pth")
 
     # Load data paths
-    hdf5s_dir = os.path.join(cfg.exp.workspace, "hdf5s", cfg.dataset.test_set)
+    hdf5s_dir = resolve_hdf5_dir(cfg.exp.workspace, cfg.dataset.test_set, cfg.feature.sample_rate)
     _, hdf5_paths = traverse_folder(hdf5s_dir)
 
     # Saving Probabilities Folder
-    probs_dir = os.path.join(cfg.exp.workspace, f"probs_{cfg.model.type}", cfg.dataset.test_set, model_name, f"{cfg.exp.ckpt_iteration}_iteration")
+    probs_dir = os.path.join(cfg.exp.workspace, f"probs_{cfg.model.type}", cfg.dataset.test_set, model_name, f"{cfg.exp.ckpt_iteration}_iterations")
     create_folder(probs_dir)
 
     # Initialize the appropriate transcriptor
@@ -277,7 +298,8 @@ def infer(cfg):
                     'reg_offset_roll': target_dict['reg_offset_roll'],
                     'ref_on_off_pairs': ref_on_off_pairs,
                     'ref_midi_notes': ref_midi_notes,
-                    'ref_velocity': ref_velocity
+                    'ref_velocity': ref_velocity,
+                    'checkpoint_iteration': cfg.exp.ckpt_iteration,
                 })
 
                 # Save the combined data to Probabilities Folder
@@ -316,9 +338,20 @@ def print_max_value(key, *dicts, name="Dict"):
             print(f"\n{name} {i} does not contain key: {key}")
 
 
+def _apply_model_defaults(cfg):
+    """Override feature config for pretrained models that expect specific input audio-features."""
+    if cfg.model.name == "FiLMUNetPretrained":
+        cfg.feature.sample_rate = 16000
+        cfg.feature.segment_seconds = 2.0
+        cfg.feature.hop_seconds = 1.0
+        cfg.feature.frames_per_second = 100
+        cfg.feature.audio_feature = "logmel"
+
+
 if __name__ == '__main__':
     initialize(config_path="./", job_name="infer", version_base=None)
     cfg = compose(config_name="config", overrides=sys.argv[1:])
+    _apply_model_defaults(cfg)
 
     print("=" * 80)
     print(f"Inference Mode : {cfg.exp.run_infer.upper()}")
@@ -328,7 +361,7 @@ if __name__ == '__main__':
     print("=" * 80)
 
     if cfg.exp.run_infer == "single":
-        print(f"Checkpoint     : {cfg.exp.ckpt_iteration}_iteration.pth")
+        print(f"Checkpoint     : {cfg.exp.ckpt_iteration}_iterations.pth")
         t1 = time.time()
         infer(cfg)
         print(f"\n[Done] Inference time: {time.time() - t1:.2f} sec")
@@ -337,17 +370,26 @@ if __name__ == '__main__':
     elif cfg.exp.run_infer == "multi":
         model_name = get_model_name(cfg)
         ckpt_dir = os.path.join(cfg.exp.workspace, "checkpoints", model_name)
-        ckpt_files = sorted([f for f in os.listdir(ckpt_dir) if f.endswith("_iteration.pth")],
-                            key=lambda x: int(x.replace("_iteration.pth", "")))
+        def _iteration_id(filename):
+            stem = filename.replace("_iterations.pth", "")
+            return int(stem) if stem.isdigit() else None
+
+        ckpt_files = sorted(
+            [
+                f for f in os.listdir(ckpt_dir)
+                if f.endswith("_iterations.pth")
+            ],
+            key=lambda x: _iteration_id(x) or 0,
+        )
         print(f"Found {len(ckpt_files)} checkpoints in {ckpt_dir}")
 
         total_start = time.time()
         for idx, ckpt_file in enumerate(ckpt_files):
-            ckpt_iteration = ckpt_file.replace("_iteration.pth", "")
+            ckpt_iteration = ckpt_file.replace("_iterations.pth", "")
             cfg.exp.ckpt_iteration = ckpt_iteration
             
             tqdm.write("-" * 60)
-            tqdm.write(f"[{idx+1}/{len(ckpt_files)}] {ckpt_iteration}_iteration.pth")
+            tqdm.write(f"[{idx+1}/{len(ckpt_files)}] {ckpt_iteration}_iterations.pth")
 
             t1 = time.time()
             infer(cfg)

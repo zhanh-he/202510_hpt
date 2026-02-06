@@ -1,0 +1,71 @@
+_wandb:
+    value:
+        cli_version: 0.23.0
+        e:
+            s09xz9s7fgsy7hbviydpnezcs11y4paf:
+                args:
+                    - exp.run_infer=multi
+                    - exp.num_workers=12
+                    - model.type=velo
+                    - model.name=DynestAudioCNN
+                    - dataset.test_set=smd
+                codePath: pytorch/calculate_scores.py
+                codePathLocal: pytorch/calculate_scores.py
+                cpu_count: 6
+                cpu_count_logical: 12
+                cudaVersion: "12.2"
+                disk:
+                    /:
+                        total: "205286293504"
+                        used: "88327856128"
+                executable: /media/datadisk/home/22828187/conda_env/miniconda3/envs/bark_env/bin/python
+                git:
+                    commit: 0dfb19affa3d909503f5310159ab1b48f875ced6
+                    remote: https://github.com/zhanh-he/202510_hpt.git
+                gpu: NVIDIA GeForce RTX 3090
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Ampere
+                      cudaCores: 10496
+                      memoryTotal: "25769803776"
+                      name: NVIDIA GeForce RTX 3090
+                      uuid: GPU-481555fb-319c-96b1-5bb4-89edaae22a67
+                host: dep37160.uniwa.uwa.edu.au
+                memory:
+                    total: "67282153472"
+                os: Linux-6.8.0-90-generic-x86_64-with-glibc2.35
+                program: /media/datadisk/home/22828187/zhanh/202510_hpt/pytorch/calculate_scores.py
+                python: CPython 3.10.19
+                root: /media/datadisk/home/22828187/zhanh/202510_hpt
+                startedAt: "2026-02-06T14:48:16.599207Z"
+                writerId: s09xz9s7fgsy7hbviydpnezcs11y4paf
+        m: []
+        python_version: 3.10.19
+        t:
+            "1":
+                - 1
+                - 50
+                - 100
+            "2":
+                - 1
+                - 50
+                - 100
+            "3":
+                - 2
+                - 13
+                - 16
+                - 61
+            "4": 3.10.19
+            "5": 0.23.0
+            "12": 0.23.0
+            "13": linux-x86_64
+ckpt:
+    value: ""
+dataset:
+    value: smd
+input2:
+    value: null
+input3:
+    value: null
+model_name:
+    value: DynestAudioCNN

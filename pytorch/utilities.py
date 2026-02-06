@@ -24,6 +24,32 @@ def create_folder(fd):
         os.makedirs(fd)
         
         
+def resolve_hdf5_dir(workspace, dataset_name, sample_rate=None):
+    """Resolve the actual hdf5 directory by checking sr-specific suffixes."""
+    base = os.path.join(workspace, "hdf5s")
+    direct = os.path.join(base, dataset_name)
+    if os.path.isdir(direct):
+        return direct
+
+    candidates = []
+    if sample_rate is not None:
+        sr_dir = os.path.join(base, f"{dataset_name}_sr{int(sample_rate)}")
+        candidates.append(sr_dir)
+    # look for any directory starting with dataset_name
+    if os.path.isdir(base):
+        for entry in os.listdir(base):
+            if entry.startswith(dataset_name + "_sr"):
+                candidates.append(os.path.join(base, entry))
+
+    for candidate in candidates:
+        if os.path.isdir(candidate):
+            return candidate
+
+    raise FileNotFoundError(
+        f"Cannot resolve hdf5 directory for dataset '{dataset_name}' under {base}"
+    )
+
+
 def get_filename(path):
     path = os.path.realpath(path)
     na_ext = path.split('/')[-1]

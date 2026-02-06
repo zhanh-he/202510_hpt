@@ -5,7 +5,6 @@ import torch.nn.functional as F
 import torchaudio.transforms as T
 from feature_extractor import get_feature_extractor_and_bins
 from pytorch_utils import move_data_to_device
-# from mamba_ssm import Mamba
 from einops import rearrange
 
 class Rearrange(nn.Module):
@@ -58,128 +57,6 @@ def init_gru(rnn):
         _concat_init(getattr(rnn, f'weight_hh_l{i}'),
                      [_inner_uniform, _inner_uniform, nn.init.orthogonal_])
         nn.init.constant_(getattr(rnn, f'bias_hh_l{i}'), 0.)
-
-################ Mamba Session ################# Block and Module ##############
-################################################################################
-
-# class Mamba1(nn.Module):
-#     """基础版：单层 Mamba 替代 GRU，用于速度估计"""
-#     def __init__(self, classes_num, input_shape, momentum):
-#         super().__init__()
-#         self.conv_block1 = HPTConvBlock(1, 48, momentum)
-#         self.conv_block2 = HPTConvBlock(48, 64, momentum)
-#         self.conv_block3 = HPTConvBlock(64, 96, momentum)
-#         self.conv_block4 = HPTConvBlock(96, 128, momentum)
-#         with torch.no_grad():
-#             dummy = torch.zeros((1, 1, 1000, input_shape))
-#             x = self.conv_block4(self.conv_block3(self.conv_block2(self.conv_block1(dummy))))
-#             # Flatten later uses x.transpose(1,2).flatten(2) -> channels * freq
-#             midfeat = x.shape[1] * x.shape[3]
-#         self.fc5 = nn.Linear(midfeat, 768, bias=False)
-#         self.bn5 = nn.BatchNorm1d(768, momentum)
-#         self.mamba = Mamba(d_model=768, d_state=16, d_conv=4, expand=2)
-#         self.layer_norm = nn.LayerNorm(768)
-#         self.proj = nn.Linear(768, classes_num)
-#         self.init_weight()
-#     def init_weight(self):
-#         init_layer(self.fc5); init_bn(self.bn5); init_layer(self.proj)
-#     def forward(self, x):
-#         for block in [self.conv_block1, self.conv_block2, self.conv_block3, self.conv_block4]:
-#             x = F.dropout(block(x), 0.2, self.training)
-#         x = F.relu(self.bn5(self.fc5(x.transpose(1,2).flatten(2)).transpose(1,2)).transpose(1,2))
-#         x = F.dropout(self.mamba(self.layer_norm(x)), 0.5, self.training)
-#         return torch.sigmoid(self.proj(x))
-
-# ============== Mamba2 (FasNet风格改进版，可切换) ==============
-# class Mamba2(nn.Module):
-#     """
-#     改进版：融合卷积通道 + 双层 Mamba 模块，具备残差路径。
-#     参考 FasNet 结构，适合长序列学习。
-#     """
-#     def __init__(self, classes_num, input_shape, momentum):
-#         super().__init__()
-#         self.conv_block1 = HPTConvBlock(1,48,momentum); self.conv_block2 = HPTConvBlock(48,64,momentum)
-#         self.conv_block3 = HPTConvBlock(64,96,momentum); self.conv_block4 = HPTConvBlock(96,128,momentum)
-#         with torch.no_grad():
-#             dummy=torch.zeros((1,1,1000,input_shape));x=self.conv_block4(self.conv_block3(self.conv_block2(self.conv_block1(dummy))))
-#             midfeat=x.shape[2]*x.shape[3]
-#         self.fc5=nn.Linear(midfeat,768,bias=False);self.bn5=nn.BatchNorm1d(768,momentum)
-#         self.mamba=Mamba(d_model=768,d_state=16,d_conv=4,expand=2)
-#         self.mamba_layer=nn.Sequential(nn.LayerNorm(768),self.mamba)
-#         self.conv_layer=nn.Sequential(nn.LayerNorm(768),Rearrange('b n c -> b c n'),
-#             nn.Conv1d(768,768,31,groups=768,padding='same'),Rearrange('b c n -> b n c'))
-#         self.proj=nn.Linear(768,classes_num); self.init_weight()
-#     def init_weight(self): init_layer(self.fc5);init_bn(self.bn5);init_layer(self.proj)
-#     def forward(self,x):
-#         for b in [self.conv_block1,self.conv_block2,self.conv_block3,self.conv_block4]:
-#             x=F.dropout(b(x),0.2,self.training)
-#         x=F.relu(self.bn5(self.fc5(x.transpose(1,2).flatten(2)).transpose(1,2)).transpose(1,2))
-#         m_in=self.mamba_layer[0](x);m_out=self.mamba(m_in);m_out=m_in+m_out
-#         c_out=self.conv_layer(m_out);p_out=self.proj(m_out.contiguous().view(-1,m_out.shape[2])).view(m_in.shape)
-#         return torch.sigmoid(c_out+p_out)
-
-# class Single_Velo_Mamba(nn.Module):
-#     def __init__(self, cfg):
-#         super().__init__()
-#         sr, fft, fps, feat, cls = cfg.feature.sample_rate, cfg.feature.fft_size, cfg.feature.frames_per_second, cfg.feature.audio_feature, cfg.feature.classes_num
-#         self.feature_extractor, self.FRE = get_feature_extractor_and_bins(feat, sr, fft, fps)
-#         self.bn0 = nn.BatchNorm2d(self.FRE, 0.01)
-#         self.velocity_model = Mamba1(cls, self.FRE, 0.01)
-#         # self.velocity_model = Mamba2(cls, self.FRE, 0.01)
-#         init_bn(self.bn0)
-#     def forward(self, x):
-#         x = self.bn0(self.feature_extractor(x).unsqueeze(3)).transpose(1,3)
-#         return {'velocity_output': self.velocity_model(x)}
-
-# class Dual_Velo_Mamba(nn.Module):
-#     def __init__(self, cfg):
-#         super().__init__()
-#         sr, fft, fps, feat, cls = cfg.feature.sample_rate, cfg.feature.fft_size, cfg.feature.frames_per_second, cfg.feature.audio_feature, cfg.feature.classes_num
-#         self.feature_extractor, self.FRE = get_feature_extractor_and_bins(feat, sr, fft, fps)
-#         self.bn0 = nn.BatchNorm2d(self.FRE, 0.01)
-#         self.velocity_model = Mamba1(cls, self.FRE, 0.01)
-#         # self.velocity_model = Mamba2(cls, self.FRE, 0.01)
-#         self.bilstm = nn.LSTM(176, 256, 1, batch_first=True, bidirectional=True)
-#         self.velo_fc = nn.Linear(512, cls)
-#         init_bn(self.bn0); init_bilstm(self.bilstm); init_layer(self.velo_fc)
-#     def forward(self, x1, x2):
-#         x = self.bn0(self.feature_extractor(x1).unsqueeze(3)).transpose(1,3)
-#         pre = self.velocity_model(x)
-#         # --- TypeA ---
-#         x = torch.cat((pre, x2), 2)
-#         # --- TypeB ---
-#         # x = torch.cat((pre, (pre.detach()**0.5)*x2), 2)
-#         # --- TypeC ---
-#         # x = torch.cat((pre, ((pre.detach()+x2)**0.5)*x2), 2)
-#         x,_=self.bilstm(x)
-#         return {'velocity_output': torch.sigmoid(self.velo_fc(x))}
-
-# class Triple_Velo_Mamba(nn.Module):
-#     def __init__(self, cfg):
-#         super().__init__()
-#         sr, fft, fps, feat, cls = cfg.feature.sample_rate, cfg.feature.fft_size, cfg.feature.frames_per_second, cfg.feature.audio_feature, cfg.feature.classes_num
-#         self.feature_extractor, self.FRE = get_feature_extractor_and_bins(feat, sr, fft, fps)
-#         self.bn0 = nn.BatchNorm2d(self.FRE, 0.01)
-#         self.velocity_model = Mamba1(cls, self.FRE, 0.01)
-#         # self.velocity_model = Mamba2(cls, self.FRE, 0.01)
-#         self.bilstm = nn.LSTM(264, 256, 1, batch_first=True, bidirectional=True)
-#         self.velo_fc = nn.Linear(512, cls)
-#         init_bn(self.bn0); init_bilstm(self.bilstm); init_layer(self.velo_fc)
-#     def forward(self, x1, x2, x3):
-#         x = self.bn0(self.feature_extractor(x1).unsqueeze(3)).transpose(1,3)
-#         pre = self.velocity_model(x)
-#         # --- TypeA ---
-#         x = torch.cat((pre, x2, x3), 2)
-#         # --- TypeB ---
-#         # x = torch.cat((pre, (pre.detach()**0.5)*x2, x3), 2)
-#         # --- TypeC ---
-#         # x = torch.cat((pre, ((pre.detach()+x2)**0.5)*x2, x3), 2)
-#         x,_=self.bilstm(x)
-#         return {'velocity_output': torch.sigmoid(self.velo_fc(x))}
-    
-
-################ HPT Session ################# Block and Module ################
-################################################################################
 
 class HPTConvBlock(nn.Module):
     def __init__(self, in_channels, out_channels, momentum):
@@ -519,9 +396,7 @@ class Dual_Velocity_ONF(nn.Module):
         init_bilstm(self.bilstm)
         init_layer(self.velo_fc)
     def forward(self, input1, input2):
-        """
-        TypeA/B/C 融合方式与 HPT、Mamba 相同。
-        """
+        """TypeA/B/C 融合方式与 HPT 其他模型一致。"""
         x_feat = self.bn0(self.feature_extractor(input1).unsqueeze(3)).transpose(1, 3)
         pre_velocity = self.velocity_model(x_feat)
         x = torch.cat((pre_velocity, input2), dim=2)  # ← TypeA

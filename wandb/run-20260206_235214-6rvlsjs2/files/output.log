@@ -1,0 +1,66 @@
+------------------------------------------------------------
+[1/13] Evaluating: 0_iterations.pth
+concurrent.futures.process._RemoteTraceback:
+"""
+Traceback (most recent call last):
+  File "/media/datadisk/home/22828187/conda_env/miniconda3/envs/bark_env/lib/python3.10/concurrent/futures/process.py", line 246, in _process_worker
+    r = call_item.fn(*call_item.args, **call_item.kwargs)
+  File "/media/datadisk/home/22828187/conda_env/miniconda3/envs/bark_env/lib/python3.10/concurrent/futures/process.py", line 205, in _process_chunk
+    return [fn(*args) for args in chunk]
+  File "/media/datadisk/home/22828187/conda_env/miniconda3/envs/bark_env/lib/python3.10/concurrent/futures/process.py", line 205, in <listcomp>
+    return [fn(*args) for args in chunk]
+  File "/media/datadisk/home/22828187/zhanh/202510_hpt/pytorch/calculate_scores.py", line 72, in calculate_score_per_song
+    total_dict = pickle.load(open(prob_path, 'rb'))
+FileNotFoundError: [Errno 2] No such file or directory: '/media/datadisk/home/22828187/zhanh/202510_hpt_data/workspaces/probs_velo/smd/FiLMUNetPretrained+frame/0_iterations/Beethoven_Op027No1-02_003_20090916-SMD.pkl'
+"""
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/media/datadisk/home/22828187/zhanh/202510_hpt/pytorch/calculate_scores.py", line 244, in <module>
+    stats_dict = score_calculator.metrics()
+  File "/media/datadisk/home/22828187/zhanh/202510_hpt/pytorch/calculate_scores.py", line 60, in metrics
+    stats_list = list(results)
+  File "/media/datadisk/home/22828187/conda_env/miniconda3/envs/bark_env/lib/python3.10/concurrent/futures/process.py", line 575, in _chain_from_iterable_of_lists
+    for element in iterable:
+  File "/media/datadisk/home/22828187/conda_env/miniconda3/envs/bark_env/lib/python3.10/concurrent/futures/_base.py", line 621, in result_iterator
+    yield _result_or_cancel(fs.pop())
+  File "/media/datadisk/home/22828187/conda_env/miniconda3/envs/bark_env/lib/python3.10/concurrent/futures/_base.py", line 319, in _result_or_cancel
+    return fut.result(timeout)
+  File "/media/datadisk/home/22828187/conda_env/miniconda3/envs/bark_env/lib/python3.10/concurrent/futures/_base.py", line 451, in result
+    return self.__get_result()
+  File "/media/datadisk/home/22828187/conda_env/miniconda3/envs/bark_env/lib/python3.10/concurrent/futures/_base.py", line 403, in __get_result
+    raise self._exception
+FileNotFoundError: [Errno 2] No such file or directory: '/media/datadisk/home/22828187/zhanh/202510_hpt_data/workspaces/probs_velo/smd/FiLMUNetPretrained+frame/0_iterations/Beethoven_Op027No1-02_003_20090916-SMD.pkl'
+concurrent.futures.process._RemoteTraceback:
+"""
+Traceback (most recent call last):
+  File "/media/datadisk/home/22828187/conda_env/miniconda3/envs/bark_env/lib/python3.10/concurrent/futures/process.py", line 246, in _process_worker
+    r = call_item.fn(*call_item.args, **call_item.kwargs)
+  File "/media/datadisk/home/22828187/conda_env/miniconda3/envs/bark_env/lib/python3.10/concurrent/futures/process.py", line 205, in _process_chunk
+    return [fn(*args) for args in chunk]
+  File "/media/datadisk/home/22828187/conda_env/miniconda3/envs/bark_env/lib/python3.10/concurrent/futures/process.py", line 205, in <listcomp>
+    return [fn(*args) for args in chunk]
+  File "/media/datadisk/home/22828187/zhanh/202510_hpt/pytorch/calculate_scores.py", line 72, in calculate_score_per_song
+    total_dict = pickle.load(open(prob_path, 'rb'))
+FileNotFoundError: [Errno 2] No such file or directory: '/media/datadisk/home/22828187/zhanh/202510_hpt_data/workspaces/probs_velo/smd/FiLMUNetPretrained+frame/0_iterations/Beethoven_Op027No1-02_003_20090916-SMD.pkl'
+"""
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/media/datadisk/home/22828187/zhanh/202510_hpt/pytorch/calculate_scores.py", line 244, in <module>
+    stats_dict = score_calculator.metrics()
+  File "/media/datadisk/home/22828187/zhanh/202510_hpt/pytorch/calculate_scores.py", line 60, in metrics
+    stats_list = list(results)
+  File "/media/datadisk/home/22828187/conda_env/miniconda3/envs/bark_env/lib/python3.10/concurrent/futures/process.py", line 575, in _chain_from_iterable_of_lists
+    for element in iterable:
+  File "/media/datadisk/home/22828187/conda_env/miniconda3/envs/bark_env/lib/python3.10/concurrent/futures/_base.py", line 621, in result_iterator
+    yield _result_or_cancel(fs.pop())
+  File "/media/datadisk/home/22828187/conda_env/miniconda3/envs/bark_env/lib/python3.10/concurrent/futures/_base.py", line 319, in _result_or_cancel
+    return fut.result(timeout)
+  File "/media/datadisk/home/22828187/conda_env/miniconda3/envs/bark_env/lib/python3.10/concurrent/futures/_base.py", line 451, in result
+    return self.__get_result()
+  File "/media/datadisk/home/22828187/conda_env/miniconda3/envs/bark_env/lib/python3.10/concurrent/futures/_base.py", line 403, in __get_result
+    raise self._exception
+FileNotFoundError: [Errno 2] No such file or directory: '/media/datadisk/home/22828187/zhanh/202510_hpt_data/workspaces/probs_velo/smd/FiLMUNetPretrained+frame/0_iterations/Beethoven_Op027No1-02_003_20090916-SMD.pkl'

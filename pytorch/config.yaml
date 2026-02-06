@@ -29,6 +29,7 @@ exp:
   # Infer and Eval
   run_infer: 'single' # 'multi'
   ckpt_iteration: ""  # 180_000
+  ckpt_file: ""
 
 
 feature:
@@ -68,9 +69,10 @@ dataset:
 
 model:
   type: "velo" # "notes"
-  name: "Single_Velo_Mamba1" # 'Single_Velocity_HPT', 'Dual_Velocity_HPT', 'Triple_Velocity_HPT'
+  name: "Single_Velocity_HPT" # 'Single_Velocity_HPT', 'Dual_Velocity_HPT', 'Triple_Velocity_HPT', 'FiLMUNetPretrained'
   input2: null # onset, offset, frame, exframe, null - None
   input3: null # onset, offset, frame, exframe, null - None
+  pretrained_checkpoint: "/media/datadisk/home/22828187/zhanh/202510_hpt_data/workspaces/checkpoints/FiLMUNetPretrained+frame/1000000_iterations.pth"
 
 
 post:
