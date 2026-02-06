@@ -1,5 +1,4 @@
 import csv
-import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -7,16 +6,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import h5py
 import numpy as np
 from hydra import compose, initialize
-from sklearn.metrics import (
-    average_precision_score,
-    f1_score,
-    precision_recall_fscore_support,
-    precision_score,
-    recall_score,
-)
+from sklearn.metrics import f1_score, precision_score, recall_score
 from tqdm import tqdm
 
-from inference import VeloTranscription, _apply_model_defaults
+from inference import VeloTranscription
 from utilities import (
     TargetProcessor,
     create_folder,
@@ -32,7 +25,7 @@ def note_level_l1_per_window(
     target_segment: Dict[str, np.ndarray],
 ) -> Tuple[np.ndarray, int]:
     """Kim et al. note-level L1 error for a single segment."""
-    segment_error = np.empty((0, 88), float)
+    error_rows: List[np.ndarray] = []
     num_notes = 0
     frames = min(
         output_segment["velocity_output"].shape[0],
@@ -48,16 +41,20 @@ def note_level_l1_per_window(
         gt_frame = target_segment["velocity_roll"][nth_frame]
         pred_onset = np.multiply(pred_frame, gt_onset_frame) * 128.0
         gt_onset = np.multiply(gt_frame, gt_onset_frame)
-        note_error = np.abs(pred_onset - gt_onset).reshape(1, -1)
+        note_error = np.abs(pred_onset - gt_onset)
 
         num_notes += int(np.count_nonzero(gt_onset_frame))
-        segment_error = np.append(segment_error, note_error, axis=0)
+        error_rows.append(note_error[np.newaxis, :])
 
+    if error_rows:
+        segment_error = np.concatenate(error_rows, axis=0)
+    else:
+        segment_error = np.empty((0, 88), dtype=float)
     return segment_error, num_notes
 
 
-def classification_error(score: np.ndarray, estimation: np.ndarray) -> Tuple[float, ...]:
-    """Binary frame classification metrics."""
+def classification_error(score: np.ndarray, estimation: np.ndarray) -> Tuple[float, float, float]:
+    """Binary frame classification metrics on flattened frame/key pairs."""
     score_bin = score.copy()
     estimation_bin = estimation.copy()
 
@@ -65,18 +62,12 @@ def classification_error(score: np.ndarray, estimation: np.ndarray) -> Tuple[flo
     estimation_bin[estimation_bin > 0.0001] = 1
     estimation_bin[estimation_bin <= 0.0001] = 0
 
-    precision_ave = average_precision_score(score_bin.flatten(), estimation_bin.flatten())
-    f1 = f1_score(score_bin.flatten(), estimation_bin.flatten(), average="macro")
-    precision = precision_score(score_bin.flatten(), estimation_bin.flatten(), average="macro")
-    recall = recall_score(score_bin.flatten(), estimation_bin.flatten(), average="macro")
-    prfs = precision_recall_fscore_support(
-        score_bin.flatten(), estimation_bin.flatten(), zero_division=0
-    )
-    frame_precision = prfs[0][1]
-    frame_recall = prfs[1][1]
-    frame_f1 = prfs[2][1]
-
-    return precision_ave, f1, precision, recall, frame_precision, frame_recall, frame_f1
+    flat_score = score_bin.flatten()
+    flat_est = estimation_bin.flatten()
+    f1 = f1_score(flat_score, flat_est, average="macro", zero_division=0)
+    precision = precision_score(flat_score, flat_est, average="macro", zero_division=0)
+    recall = recall_score(flat_score, flat_est, average="macro", zero_division=0)
+    return f1, precision, recall
 
 
 def num_simultaneous_notes(note_profile: Dict[str, np.ndarray], score: np.ndarray) -> int:
@@ -113,11 +104,11 @@ def get_midi_sound_profile(midi_vel_roll: np.ndarray) -> List[Dict[str, np.ndarr
 def gt_to_note_list(
     output_dict_list: Sequence[Dict[str, np.ndarray]],
     target_list: Sequence[Dict[str, np.ndarray]],
-) -> Tuple[float, float, List[Dict[str, np.ndarray]], float, float, float, float, float, float, float]:
+    ) -> Tuple[float, float, List[Dict[str, np.ndarray]], float, float, float]:
     """Kim et al. per-note error profile."""
-    score = np.empty((0, 88), float)
-    pedal = np.empty((0,), float)
-    estimation = np.empty((0, 88), float)
+    score_rows: List[np.ndarray] = []
+    pedal_list: List[np.ndarray] = []
+    estimation_rows: List[np.ndarray] = []
 
     for target_segment, output_segment in zip(target_list, output_dict_list):
         frames = target_segment["velocity_roll"].shape[0]
@@ -126,16 +117,18 @@ def gt_to_note_list(
             gt_pedal = target_segment["pedal_frame_roll"][nth_frame]
             output_vel_frame = output_segment["velocity_output"][nth_frame]
 
-            score = np.append(score, gt_velframe[None, :], axis=0)
-            pedal = np.append(pedal, gt_pedal)
-            estimation = np.append(estimation, output_vel_frame[None, :], axis=0)
+            score_rows.append(gt_velframe[np.newaxis, :])
+            pedal_list.append(np.asarray(gt_pedal).reshape(1))
+            estimation_rows.append(output_vel_frame[np.newaxis, :])
 
-    if score.size == 0:
-        return (0.0, 0.0, [], 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    if not score_rows:
+        return (0.0, 0.0, [], 0.0, 0.0, 0.0)
 
-    precision_ave, f1, precision, recall, frame_precision, frame_recall, frame_f1 = (
-        classification_error(score.copy(), estimation.copy())
-    )
+    score = np.concatenate(score_rows, axis=0)
+    estimation = np.concatenate(estimation_rows, axis=0)
+    pedal = np.concatenate(pedal_list, axis=0)
+
+    f1, precision, recall = classification_error(score.copy(), estimation.copy())
 
     score = np.transpose(score)
     estimation = np.transpose(estimation)
@@ -165,25 +158,14 @@ def gt_to_note_list(
                 "pedal_check": pedal_onoff,
                 "simultaneous_notes": sim_note_count,
                 "classification_check": classification_check,
-            }
+            } # type: ignore
         )
         accum_error.append(notelevel_error)
 
     frame_max_error = float(np.mean(accum_error)) if accum_error else 0.0
     std_max_error = float(np.std(accum_error)) if accum_error else 0.0
 
-    return (
-        frame_max_error,
-        std_max_error,
-        error_profile,
-        precision_ave,
-        f1,
-        precision,
-        recall,
-        frame_precision,
-        frame_recall,
-        frame_f1,
-    )
+    return frame_max_error, std_max_error, error_profile, f1, precision, recall
 
 
 def eval_from_list(
@@ -191,7 +173,7 @@ def eval_from_list(
     target_dict_list: Sequence[Dict[str, np.ndarray]],
 ) -> Tuple[float, float]:
     """Kim et al. onset-only evaluation."""
-    score_error = np.empty((0, 88), float)
+    score_error_rows: List[np.ndarray] = []
     num_note = 0
     for output_dict_segmentseconds, target_dict_segmentseconds in zip(
         output_dict_list, target_dict_list
@@ -199,12 +181,14 @@ def eval_from_list(
         segment_error, num_onset = note_level_l1_per_window(
             output_dict_segmentseconds, target_dict_segmentseconds
         )
-        score_error = np.append(score_error, segment_error, axis=0)
+        if segment_error.size:
+            score_error_rows.append(segment_error)
         num_note += num_onset
 
     if num_note == 0:
         return 0.0, 0.0
 
+    score_error = np.concatenate(score_error_rows, axis=0) if score_error_rows else np.empty((0, 88))
     mean_error = float(np.sum(score_error) / num_note)
     non_zero = score_error[score_error != 0]
     std_error = float(non_zero.std()) if non_zero.size else 0.0
@@ -217,16 +201,12 @@ class KimStyleEvaluator:
     CSV_FIELDS = [
         "test_h5",
         "frame_max_error",
-        "std_max_error",
-        "average_precision_score",
+        "frame_max_std",
         "f1_score",
-        "precision_score",
-        "recall_score",
-        "precision_support",
-        "recall_support",
-        "f1_support",
-        "onset_mean_error",
-        "onset_std_error",
+        "precision",
+        "recall",
+        "onset_masked_error",
+        "onset_masked_std",
     ]
 
     def __init__(self, cfg):
@@ -299,34 +279,26 @@ class KimStyleEvaluator:
 
         (
             frame_max_error,
-            std_max_error,
+            frame_max_std,
             error_profile,
-            precision_ave,
             f1,
             precision,
             recall,
-            frame_precision,
-            frame_recall,
-            frame_f1,
         ) = gt_to_note_list(output_dict_list, target_dict_list)
 
-        onset_mean_error, onset_std_error = eval_from_list(output_dict_list, target_dict_list)
+        onset_masked_error, onset_masked_std = eval_from_list(output_dict_list, target_dict_list)
 
         return {
             "audio_name": Path(hdf5_path).name,
             "frame_max_error": frame_max_error,
-            "std_max_error": std_max_error,
-            "average_precision_score": precision_ave,
+            "frame_max_std": frame_max_std,
             "f1_score": f1,
-            "precision_score": precision,
-            "recall_score": recall,
-            "precision_support": frame_precision,
-            "recall_support": frame_recall,
-            "f1_support": frame_f1,
-            "onset_mean_error": onset_mean_error,
-            "onset_std_error": onset_std_error,
+            "precision": precision,
+            "recall": recall,
+            "onset_masked_error": onset_masked_error,
+            "onset_masked_std": onset_masked_std,
             "error_profile": np.array(error_profile, dtype=object),
-        }
+        } # type: ignore
 
     def run(self) -> Dict[str, List[float]]:
         csv_path = self.results_dir / f"{self.model_name}_{self.cfg.dataset.test_set}_kim.csv"
@@ -369,7 +341,6 @@ class KimStyleEvaluator:
 def main() -> None:
     initialize(config_path="./", job_name="kim_eval", version_base=None)
     cfg = compose(config_name="config", overrides=sys.argv[1:])
-    _apply_model_defaults(cfg)
 
     print("=" * 80)
     print("Evaluation Mode : Kim et al.")

@@ -26,6 +26,16 @@ def mse(output, target, mask):
     output, target, mask = _align_time_dim(output, target, mask)
     return torch.sum(((output - target) ** 2) * mask) / torch.sum(mask)
 
+
+def _masked_l1(output, target, mask):
+    """Mean absolute error restricted by mask."""
+    output, target, mask = _align_time_dim(output, target, mask)
+    diff = torch.abs(output - target) * mask
+    denom = torch.sum(mask)
+    if denom.item() == 0:
+        return torch.zeros(1, device=output.device, dtype=output.dtype)
+    return torch.sum(diff) / denom
+
 # def mae(output, target, mask):
 #     """Mean absolute error (MAE) with mask"""
 #     abs_diff = torch.abs(output - target)
@@ -69,6 +79,21 @@ def velocity_mse(model, output_dict, target_dict):
     """velocity regression losses only, used mse in ONF"""
     velocity_loss = mse(output_dict['velocity_output'], target_dict['velocity_roll'] / 128, target_dict['onset_roll'])
     return velocity_loss
+
+
+def kim_velocity_bce_l1(model, output_dict, target_dict):
+    """
+    BCE + L1 hybrid loss proposed by Kim et al. (ISMIR 2024) for velocity regression.
+    """
+    theta = getattr(model, "kim_loss_alpha", 0.5)
+    bce_loss = bce(
+        output_dict['velocity_output'],
+        target_dict['velocity_roll'] / 128,
+        target_dict['frame_roll'],
+    )
+    onset_target = target_dict['velocity_roll'] / 128
+    l1_loss = _masked_l1(output_dict['velocity_output'], onset_target, target_dict['onset_roll'])
+    return theta * bce_loss + (1 - theta) * l1_loss
 
 # def velocity_mae(model, output_dict, target_dict):
 #     """Test the performance"""
@@ -139,6 +164,8 @@ def get_loss_func(loss_type):
         return velocity_bce
     elif loss_type == 'velocity_mse':
         return velocity_mse
+    elif loss_type == 'kim_bce_l1':
+        return kim_velocity_bce_l1
     # elif loss_type == 'velocity_mae':
     #     return velocity_mae
     # elif loss_type == 'velocity_std':

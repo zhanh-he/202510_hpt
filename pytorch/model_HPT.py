@@ -81,6 +81,23 @@ class HPTConvBlock(nn.Module):
         x = F.avg_pool2d(x, kernel_size=(1,2))
         return x
 
+
+def _align_time_dim_tensors(*tensors):
+    """Trim tensors along time dimension (dim=1) to the minimum shared length."""
+    valid = [t for t in tensors if t is not None]
+    if not valid:
+        return tensors
+    min_steps = min(t.size(1) for t in valid)
+    aligned = []
+    for t in tensors:
+        if t is None:
+            aligned.append(None)
+        elif t.size(1) == min_steps:
+            aligned.append(t)
+        else:
+            aligned.append(t[:, :min_steps])
+    return tuple(aligned)
+
 class OriginalModelHPT2020(nn.Module):
     def __init__(self, classes_num, input_shape, momentum):
         super().__init__()
@@ -240,6 +257,7 @@ class Dual_Velocity_HPT(nn.Module):
         x_feat = x_feat.transpose(1, 3)               # (B, 1, T, Freq)
         # ====== 预测初始 velocity ======
         pre_velocity = self.velocity_model(x_feat)    # (B, T, 88)
+        pre_velocity, input2 = _align_time_dim_tensors(pre_velocity, input2)
         # ====== 融合策略 (选其一) ======
         # --- TypeA ---
         x = torch.cat((pre_velocity, input2), dim=2)
@@ -296,6 +314,7 @@ class Triple_Velocity_HPT(nn.Module):
         x_feat = x_feat.transpose(1, 3)           # batch, 1, T, FRE
         # ===== 预测初始 velocity =====
         pre_velocity = self.velocity_model(x_feat)  # batch, T, 88
+        pre_velocity, input2, input3 = _align_time_dim_tensors(pre_velocity, input2, input3)
         # ===== 融合策略 (选其一) =====
         # --- TypeA ---
         x = torch.cat((pre_velocity, input2, input3), dim=2) 

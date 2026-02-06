@@ -2,58 +2,40 @@ import os
 import sys
 sys.path.insert(1, os.path.join(sys.path[0], '../utils'))
 import numpy as np
-import torch
 from pytorch_utils import forward_dataloader
+from calculate_scores import gt_to_note_list, eval_from_list
 
+def _segments_from_output(output_dict):
+    """Convert batched output/target rolls to per-segment dicts used by Kim metrics."""
+    velocity = output_dict.get('velocity_output')
+    if velocity is None:
+        return [], []
+    vel_roll = output_dict.get('velocity_roll')
+    frame_roll = output_dict.get('frame_roll')
+    onset_roll = output_dict.get('onset_roll')
+    pedal_roll = output_dict.get('pedal_frame_roll')
 
-def _align_time_dim_np(*arrays):
-    """Trim numpy arrays along time axis (dim=1) to the minimum shared length."""
-    if not arrays:
-        return arrays
-    min_steps = min(arr.shape[1] for arr in arrays)
-    if all(arr.shape[1] == min_steps for arr in arrays):
-        return arrays
-    return tuple(arr[:, :min_steps, ...] for arr in arrays)
+    segments = []
+    targets = []
+    segs = velocity.shape[0]
+    for idx in range(segs):
+        pred = velocity[idx]
+        gt_vel = vel_roll[idx]
+        frames = min(pred.shape[0], gt_vel.shape[0])
+        seg_pred = {'velocity_output': pred[:frames]}
+        segments.append(seg_pred)
 
-
-def prepare_tensor(y_pred, y_true, mask):
-    """Align time dimension and convert to tensors."""
-    y_pred, y_true, mask = _align_time_dim_np(y_pred, y_true, mask)
-    mask = mask.astype(bool)
-    y_pred_tensor = torch.from_numpy(y_pred)
-    y_true_tensor = torch.from_numpy(y_true)
-    mask_tensor = torch.from_numpy(mask)
-    return y_pred_tensor, y_true_tensor, mask_tensor
-
-def cal_mae(y_pred, y_true, mask):
-    """Mean absolute error (MAE) with mask"""
-    abs_diff = torch.abs(y_pred - y_true)
-    abs_diff = abs_diff * mask
-    return torch.sum(abs_diff) / torch.sum(mask)
-
-def cal_std(y_pred, y_true, mask):
-    """Standard Deviation of Absolute Error (std_ae) with mask"""
-    abs_diff = torch.abs(y_pred - y_true)
-    abs_diff = abs_diff * mask
-    mean_abs_diff = torch.sum(abs_diff) / torch.sum(mask)
-    squared_diff = (abs_diff - mean_abs_diff) ** 2
-    squared_diff = squared_diff * mask
-    variance = torch.sum(squared_diff) / torch.sum(mask)
-    return torch.sqrt(variance)
-
-def cal_recall(y_pred, y_true, mask, threshold=12.7):
-    y_pred, y_true = y_pred[mask], y_true[mask]
-    diff = torch.abs(y_pred - y_true)
-    tp = torch.sum(diff < threshold).item() # True positives
-    fn = torch.sum(y_true != 0).item() - tp # False negatives
-    return tp / (tp + fn) if (tp + fn) > 0 else 0.0
-
-# def cal_recall(y_pred, y_true, mask, threshold=12.7):
-#     y_pred, y_true = y_pred[mask], y_true[mask]
-#     diff = np.abs(y_pred - y_true)
-#     tp = np.sum(diff < threshold)    # True positives
-#     fn = np.sum(y_true != 0) - tp    # False negatives
-#     return tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        pedal = pedal_roll[idx] if pedal_roll is not None else np.zeros(frames)
+        if pedal.ndim > 1:
+            pedal = np.squeeze(pedal, axis=-1)
+        target_entry = {
+            'velocity_roll': gt_vel[:frames],
+            'frame_roll': frame_roll[idx][:frames],
+            'onset_roll': onset_roll[idx][:frames],
+            'pedal_frame_roll': pedal[:frames],
+        }
+        targets.append(target_entry)
+    return segments, targets
 
 
 class SegmentEvaluator(object):
@@ -80,30 +62,14 @@ class SegmentEvaluator(object):
         statistics = {}
         output_dict = forward_dataloader(self.model, dataloader, self.batch_size, self.input2, self.input3)
         if 'velocity_output' in output_dict:
-            """Mask indicates only evaluate where onset exists"""
-
-            # If onset_mask is None, do not count this short segment.
-            mask = output_dict['onset_roll'] != 0        
-            if mask is None:
+            segments, targets = _segments_from_output(output_dict)
+            if not segments:
                 return statistics
-            y_pred = output_dict['velocity_output'] * 128
-            y_true = output_dict['velocity_roll']
-
-            # Convert to tensor
-            y_pred, y_true, mask = prepare_tensor(y_pred, y_true, mask)
-            mae = cal_mae(y_pred, y_true, mask)
-            std = cal_std(y_pred, y_true, mask)
-            recall = cal_recall(y_pred, y_true, mask, threshold=12.7)
-            
-            # # Calculate recall using the provided function.
-            # est_velo, gt_velo = est_velo[mask], gt_velo[mask]
-            # recall = cal_recall(y_pred, y_true, mask, threshold=12.7)
-            # mae = np.mean(np.abs(est_velo - gt_velo))
-            # std = np.std(est_velo - gt_velo)
-
-            # Round the metrics to 4 decimal places, velocity_mse, 
-            statistics['velocity_mae'] = round(mae.item(), 4) #np.around(mae, decimals=4)
-            statistics['velocity_std'] = round(std.item(), 4) #np.around(std, decimals=4)
-            statistics['velocity_recall'] = round(recall, 4) #np.around(recall, decimals=4)
+            frame_max_err, frame_max_std, _, f1, precision, recall = gt_to_note_list(segments, targets)
+            statistics['velocity_mae'] = round(frame_max_err, 4)
+            statistics['velocity_std'] = round(frame_max_std, 4)
+            # statistics['f1_score'] = round(f1, 4)
+            # statistics['precision'] = round(precision, 4)
+            statistics['velocity_recall'] = round(recall, 4)
 
         return statistics

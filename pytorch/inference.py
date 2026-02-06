@@ -1,25 +1,31 @@
 import inspect
+import inspect
 import os
 import time
-import sys
-import numpy as np
+
 import h5py
+import numpy as np
 import pickle
 import torch
-from hydra import initialize, compose
+from hydra import compose, initialize
 from tqdm import tqdm
 
 from utilities import (
-    create_folder, get_filename, traverse_folder, get_model_name,
-    write_events_to_midi, int16_to_float32,
-    TargetProcessor, RegressionPostProcessor, OnsetsFramesPostProcessor,
+    TargetProcessor,
+    RegressionPostProcessor,
+    OnsetsFramesPostProcessor,
+    create_folder,
+    get_filename,
+    get_model_name,
+    int16_to_float32,
     resolve_hdf5_dir,
+    traverse_folder,
+    write_events_to_midi,
 )
-from pytorch_utils import move_data_to_device, forward, forward_velo
-from model_HPT import Single_Velocity_HPT, Dual_Velocity_HPT, Triple_Velocity_HPT
+from pytorch_utils import forward, forward_velo
 from model_DynEst import DynestAudioCNN
-from model_orignHPT import Note_pedal
 from model_FilmUnet import FiLMUNetPretrained
+from model_HPT import Dual_Velocity_HPT, Single_Velocity_HPT, Triple_Velocity_HPT
 
 class TranscriptionBase:
     def __init__(self, checkpoint_path, cfg):
@@ -308,50 +314,9 @@ def infer(cfg):
                 pickle.dump(total_dict, open(prob_path, 'wb'))
 
 
-def print_dict_keys(*dicts, name="Dictionary"):
-    """
-    Print the keys of one or more dictionaries with a title.
-    """
-    for i, d in enumerate(dicts, start=1):
-        if isinstance(d, dict):
-            print(f"\n=== {name} {i} Keys ===")
-            for key in d.keys():
-                print(f"- {key}")
-        else:
-            print(f"\n{name} {i} is not a dictionary!")
-
-
-def print_max_value(key, *dicts, name="Dict"):
-    """
-    Print the maximum value for a specific key in multiple dictionaries.
-
-    """
-    for i, d in enumerate(dicts, start=1):
-        if key in d:
-            value = d[key]
-            if isinstance(value, (list, tuple, np.ndarray, torch.Tensor)):  # If it's an array
-                max_val = value.max() if isinstance(value, torch.Tensor) else np.max(value)
-                print(f"\n=== {name} {i}: Max {key} Value ===\n{max_val}")
-            else:
-                print(f"\n{name} {i}: {key} is not a numerical array!")
-        else:
-            print(f"\n{name} {i} does not contain key: {key}")
-
-
-def _apply_model_defaults(cfg):
-    """Override feature config for pretrained models that expect specific input audio-features."""
-    if cfg.model.name == "FiLMUNetPretrained":
-        cfg.feature.sample_rate = 16000
-        cfg.feature.segment_seconds = 2.0
-        cfg.feature.hop_seconds = 1.0
-        cfg.feature.frames_per_second = 100
-        cfg.feature.audio_feature = "logmel"
-
-
 if __name__ == '__main__':
     initialize(config_path="./", job_name="infer", version_base=None)
     cfg = compose(config_name="config", overrides=sys.argv[1:])
-    _apply_model_defaults(cfg)
 
     print("=" * 80)
     print(f"Inference Mode : {cfg.exp.run_infer.upper()}")
