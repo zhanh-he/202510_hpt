@@ -38,6 +38,37 @@ def _segments_from_output(output_dict):
     return segments, targets
 
 
+def _kim_metrics_from_segments(segments, targets):
+    """Run the same Kim-style metrics used in calculate_scores."""
+    if not segments or not targets:
+        return {}
+
+    (
+        frame_max_err,
+        frame_max_std,
+        _,
+        f1,
+        precision,
+        recall,
+    ) = gt_to_note_list(segments, targets)
+    onset_masked_error, onset_masked_std = eval_from_list(segments, targets)
+
+    stats = {
+        'frame_max_error': round(frame_max_err, 4),
+        'frame_max_std': round(frame_max_std, 4),
+        'f1_score': round(f1, 4),
+        'precision': round(precision, 4),
+        'recall': round(recall, 4),
+        'onset_masked_error': round(onset_masked_error, 4),
+        'onset_masked_std': round(onset_masked_std, 4),
+    }
+    # Backward-compatible aliases for legacy logging keys.
+    stats['velocity_mae'] = stats['frame_max_error']
+    stats['velocity_std'] = stats['frame_max_std']
+    stats['velocity_recall'] = stats['recall']
+    return stats
+
+
 class SegmentEvaluator(object):
     
     def __init__(self, model, cfg):
@@ -63,13 +94,5 @@ class SegmentEvaluator(object):
         output_dict = forward_dataloader(self.model, dataloader, self.batch_size, self.input2, self.input3)
         if 'velocity_output' in output_dict:
             segments, targets = _segments_from_output(output_dict)
-            if not segments:
-                return statistics
-            frame_max_err, frame_max_std, _, f1, precision, recall = gt_to_note_list(segments, targets)
-            statistics['velocity_mae'] = round(frame_max_err, 4)
-            statistics['velocity_std'] = round(frame_max_std, 4)
-            # statistics['f1_score'] = round(f1, 4)
-            # statistics['precision'] = round(precision, 4)
-            statistics['velocity_recall'] = round(recall, 4)
-
+            statistics.update(_kim_metrics_from_segments(segments, targets))
         return statistics

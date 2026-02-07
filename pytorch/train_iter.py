@@ -4,6 +4,7 @@ import time
 import logging
 import torch
 import torch.utils.data
+import matplotlib.pyplot as plt
 
 # from torch_optimizer import Ranger
 from torch.optim import Adam
@@ -38,6 +39,50 @@ def init_wandb(cfg, wandb_run_id):
         resume="must" if wandb_run_id else "allow",
         config=OmegaConf.to_container(cfg, resolve=True)
     )
+
+
+def log_velocity_rolls(cfg, iteration, batch_output_dict, batch_data_dict):
+    """Log prediction vs target velocity rolls to WandB at configured intervals."""
+    interval = getattr(cfg.wandb, "log_velocity_interval", None)
+    if not interval or interval <= 0 or wandb.run is None:
+        return
+    if iteration % interval != 0:
+        return
+
+    pred = batch_output_dict.get('velocity_output')
+    target = batch_data_dict.get('velocity_roll')
+    if pred is None or target is None:
+        return
+
+    pred_img = pred[0].detach().cpu().numpy()
+    target_img = target[0].detach().cpu().numpy() / 128.0
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    specs = [
+        ("Prediction", pred_img),
+        ("Ground Truth", target_img),
+    ]
+    for ax, (title, data) in zip(axes, specs):
+        im = ax.imshow(data.T, aspect='auto', origin='lower', interpolation='nearest')
+        ax.set_title(title)
+        ax.set_xlabel("Frame")
+        ax.set_ylabel("Key")
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    fig.suptitle(f"Velocity roll @ iter {iteration}")
+    fig.tight_layout()
+
+    wandb.log(
+        {"velocity_roll_comparison": wandb.Image(fig)},
+        step=iteration,
+    )
+    plt.close(fig)
+
+
+def _select_velocity_metrics(statistics):
+    """Return only the velocity MAE/STD/Recall metrics from a statistics dict."""
+    keep_keys = ("velocity_mae", "velocity_std", "velocity_recall")
+    return {k: statistics[k] for k in keep_keys if k in statistics}
+
 
 def _write_training_stats(cfg, checkpoints_dir, model_name):
     """Persist a short config snapshot next to checkpoints."""
@@ -198,8 +243,9 @@ def train(cfg):
     iteration = start_iteration
     train_bgn_time = time.time()
     train_loss = 0.0
-    
-    early_phase = int(cfg.exp.total_iteration * 0.05)    # 5% of total iterations, e.g. 10k of 200k
+
+    early_phase = 0    # disable early evaluation
+    # early_phase = int(cfg.exp.total_iteration * 0.05)  # 5% of total iterations, e.g. 10k of 200k
     early_step = int(early_phase * 0.1)                  # 10% of the early phase, e.g. 1k of 10k
 
     for batch_data_dict in train_loader:
@@ -215,6 +261,7 @@ def train(cfg):
         batch_output_dict, loss = forward_pass(cfg, model, batch_data_dict, device)
         print(iteration, loss)
         train_loss += loss.item()
+        log_velocity_rolls(cfg, iteration, batch_output_dict, batch_data_dict)
         loss.backward()
         optimizer.step()
         
@@ -227,14 +274,18 @@ def train(cfg):
             logging.info(f"Iteration: {iteration}/{cfg.exp.total_iteration}")
             train_fin_time = time.time()
             train_loss /= cfg.exp.eval_iteration
-            train_statistics = evaluator.evaluate(eval_train_loader)
-            # valid_statistics = evaluator.evaluate(eval_valid_loader)
-            valid_maestro_statistics = evaluator.evaluate(eval_maestro_loader)
-            valid_smd_statistics = evaluator.evaluate(eval_smd_loader)
-            valid_maps_statistics = evaluator.evaluate(eval_maps_loader)
+            raw_train_statistics = evaluator.evaluate(eval_train_loader)
+            raw_maestro_statistics = evaluator.evaluate(eval_maestro_loader)
+            raw_smd_statistics = evaluator.evaluate(eval_smd_loader)
+            raw_maps_statistics = evaluator.evaluate(eval_maps_loader)
+
+            train_statistics = _select_velocity_metrics(raw_train_statistics)
+            valid_maestro_statistics = _select_velocity_metrics(raw_maestro_statistics)
+            valid_smd_statistics = _select_velocity_metrics(raw_smd_statistics)
+            valid_maps_statistics = _select_velocity_metrics(raw_maps_statistics)
+
             logging.info(f"    Train Loss: {train_loss:.4f}")
             logging.info(f"    Train Stat: {train_statistics}")
-            # logging.info(f"    Valid Stat: {valid_statistics}")
             logging.info(f"    Valid Maestro Stat: {valid_maestro_statistics}")
             logging.info(f"    Valid SMD Stat: {valid_smd_statistics}")
             logging.info(f"    Valid MAPS Stat: {valid_maps_statistics}")
@@ -242,7 +293,6 @@ def train(cfg):
                 "iteration": iteration,
                 "train_loss": train_loss,
                 "train_stat": train_statistics,
-                # "valid_stat": valid_statistics,
                 "valid_maestro_stat": valid_maestro_statistics,
                 "valid_smd_stat": valid_smd_statistics,
                 "valid_maps_stat": valid_maps_statistics,

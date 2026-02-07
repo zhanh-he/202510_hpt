@@ -6,7 +6,7 @@ set -euo pipefail
 #   # or rely on the default DATA_ROOT below
 
 # DATA_ROOT_DEFAULT="/media/datadisk/home/22828187/zhanh"
-DATA_ROOT_DEFAULT="../.."
+DATA_ROOT_DEFAULT=".."
 
 TARGET_DIR="${1:-$DATA_ROOT_DEFAULT}"
 

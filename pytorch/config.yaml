@@ -2,6 +2,7 @@ wandb:
   project: "202510_hpt"
   name: "${feature.audio_feature}-${model.name}-ext${model.input2}${model.input3}-sr${feature.sample_rate}-${wandb.comment}" # -iter${exp.total_iteration}
   comment: # "mel229"
+  log_velocity_interval: ${exp.eval_iteration}  # Set 0/null to disable WandB velocity roll images
 
 exp:
   # workspace: "./workspaces" #kaya
