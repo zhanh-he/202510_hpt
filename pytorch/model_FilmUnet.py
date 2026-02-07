@@ -8,9 +8,10 @@ import torch
 import torch.nn as nn
 
 # Inject a lightweight torchlibrosa shim so the original FiLM code can import it.
-_AUDIO_SRC = Path("/media/datadisk/home/22828187/zhanh/202601_midisemi/kim_ismir2024/src")
+_VENDOR_ROOT = Path(__file__).resolve().parent / "kim_ismir2024"
+_AUDIO_SRC = _VENDOR_ROOT / "src"
 if not _AUDIO_SRC.exists():
-    raise FileNotFoundError(f"Missing audio transforms source at {_AUDIO_SRC}")
+    raise FileNotFoundError(f"Missing vendored FiLM sources at {_AUDIO_SRC}")
 sys.path.insert(0, str(_AUDIO_SRC))
 import audio_transforms  # type: ignore  # noqa: E402
 
@@ -22,9 +23,7 @@ sys.modules["torchlibrosa"] = torchlibrosa_mod
 sys.modules["torchlibrosa.stft"] = torchlibrosa_stft_mod
 
 # Reuse the untouched FiLM codebase.
-_KIM_SRC = Path("/media/datadisk/home/22828187/zhanh/backup/Kim_ismir2024_code/src")
-if not _KIM_SRC.exists():
-    raise FileNotFoundError(f"Expected FiLM U-Net sources at {_KIM_SRC}")
+_KIM_SRC = _AUDIO_SRC
 sys.path.insert(0, str(_KIM_SRC))
 
 import config as kim_config  # type: ignore  # noqa: E402
