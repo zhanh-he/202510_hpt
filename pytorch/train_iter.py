@@ -17,6 +17,7 @@ from utilities import create_folder, create_logging, RegressionPostProcessor
 from model_HPT import Single_Velocity_HPT, Dual_Velocity_HPT, Triple_Velocity_HPT
 from model_FilmUnet import FiLMUNetPretrained
 from model_DynEst import DynestAudioCNN
+from model_HPPNet import HPPNet_SP
 
 from losses import get_loss_func
 from evaluate import SegmentEvaluator
@@ -79,8 +80,8 @@ def log_velocity_rolls(cfg, iteration, batch_output_dict, batch_data_dict):
 
 
 def _select_velocity_metrics(statistics):
-    """Return only the velocity MAE/STD/Recall metrics from a statistics dict."""
-    keep_keys = ("velocity_mae", "velocity_std", "velocity_recall")
+    """Return the core velocity MAE/STD metrics from a statistics dict."""
+    keep_keys = ("velocity_mae", "velocity_std")
     return {k: statistics[k] for k in keep_keys if k in statistics}
 
 

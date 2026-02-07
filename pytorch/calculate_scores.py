@@ -70,6 +70,21 @@ def classification_error(score: np.ndarray, estimation: np.ndarray) -> Tuple[flo
     return f1, precision, recall
 
 
+def classification_with_mask(
+    score: np.ndarray, estimation: np.ndarray, mask: np.ndarray
+) -> Tuple[float, float, float]:
+    """Frame-wise metrics restricted to positions where mask > 0."""
+    mask_flat = mask.flatten() > 0
+    if not np.any(mask_flat):
+        return 0.0, 0.0, 0.0
+    flat_score = (score > 0).astype(np.int32).flatten()[mask_flat]
+    flat_est = (estimation > 0.0001).astype(np.int32).flatten()[mask_flat]
+    f1 = f1_score(flat_score, flat_est, average="macro", zero_division=0)
+    precision = precision_score(flat_score, flat_est, average="macro", zero_division=0)
+    recall = recall_score(flat_score, flat_est, average="macro", zero_division=0)
+    return f1, precision, recall
+
+
 def num_simultaneous_notes(note_profile: Dict[str, np.ndarray], score: np.ndarray) -> int:
     start, end = note_profile["duration"]
     sim_note_count = 0
@@ -109,6 +124,7 @@ def gt_to_note_list(
     score_rows: List[np.ndarray] = []
     pedal_list: List[np.ndarray] = []
     estimation_rows: List[np.ndarray] = []
+    frame_mask_rows: List[np.ndarray] = []
 
     for target_segment, output_segment in zip(target_list, output_dict_list):
         frames = target_segment["velocity_roll"].shape[0]
@@ -120,15 +136,20 @@ def gt_to_note_list(
             score_rows.append(gt_velframe[np.newaxis, :])
             pedal_list.append(np.asarray(gt_pedal).reshape(1))
             estimation_rows.append(output_vel_frame[np.newaxis, :])
+            frame_mask_rows.append(target_segment["frame_roll"][nth_frame][np.newaxis, :])
 
     if not score_rows:
-        return (0.0, 0.0, [], 0.0, 0.0, 0.0)
+        return (0.0, 0.0, [], 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
     score = np.concatenate(score_rows, axis=0)
     estimation = np.concatenate(estimation_rows, axis=0)
     pedal = np.concatenate(pedal_list, axis=0)
+    frame_mask = np.concatenate(frame_mask_rows, axis=0)
 
     f1, precision, recall = classification_error(score.copy(), estimation.copy())
+    frame_f1, frame_precision, frame_recall = classification_with_mask(
+        score.copy(), estimation.copy(), frame_mask.copy()
+    )
 
     score = np.transpose(score)
     estimation = np.transpose(estimation)
@@ -165,7 +186,17 @@ def gt_to_note_list(
     frame_max_error = float(np.mean(accum_error)) if accum_error else 0.0
     std_max_error = float(np.std(accum_error)) if accum_error else 0.0
 
-    return frame_max_error, std_max_error, error_profile, f1, precision, recall
+    return (
+        frame_max_error,
+        std_max_error,
+        error_profile,
+        f1,
+        precision,
+        recall,
+        frame_f1,
+        frame_precision,
+        frame_recall,
+    )
 
 
 def eval_from_list(
@@ -205,6 +236,9 @@ class KimStyleEvaluator:
         "f1_score",
         "precision",
         "recall",
+        "frame_mask_f1",
+        "frame_mask_precision",
+        "frame_mask_recall",
         "onset_masked_error",
         "onset_masked_std",
     ]
@@ -284,6 +318,9 @@ class KimStyleEvaluator:
             f1,
             precision,
             recall,
+            frame_mask_f1,
+            frame_mask_precision,
+            frame_mask_recall,
         ) = gt_to_note_list(output_dict_list, target_dict_list)
 
         onset_masked_error, onset_masked_std = eval_from_list(output_dict_list, target_dict_list)
@@ -295,6 +332,9 @@ class KimStyleEvaluator:
             "f1_score": f1,
             "precision": precision,
             "recall": recall,
+            "frame_mask_f1": frame_mask_f1,
+            "frame_mask_precision": frame_mask_precision,
+            "frame_mask_recall": frame_mask_recall,
             "onset_masked_error": onset_masked_error,
             "onset_masked_std": onset_masked_std,
             "error_profile": np.array(error_profile, dtype=object),

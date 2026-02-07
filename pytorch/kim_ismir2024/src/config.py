@@ -10,14 +10,14 @@ from __future__ import annotations
 import torch
 
 # Audio / feature extraction parameters
-sample_rate: int = 22050
+sample_rate: int = 16000
 frames_per_second: int = 100
 classes_num: int = 88
 spec_feat: str = "mel"  # {"power", "mel", "bark", "sone"}
 
 # Conditioning setup (can be overridden by our wrapper)
 condition_check: bool = False
-condition_type: str = "onset"
+condition_type: str = "frame"
 condition_net: str = "DynamicFCInitFirst"  # or "DynamicFC"
 
 # Misc constants occasionally referenced in helper layers

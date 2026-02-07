@@ -69,6 +69,15 @@ def _masked_l1(output, target, mask):
 #     return torch.sqrt(variance)
     
 
+def _bce_unmasked(output, target):
+    """Binary crossentropy without masking."""
+    output, target = _align_time_dim(output, target)
+    eps = 1e-7
+    output = torch.clamp(output, eps, 1. - eps)
+    matrix = - target * torch.log(output) - (1. - target) * torch.log(1. - output)
+    return matrix.mean()
+
+
 ############ Velocity loss ############
 def velocity_bce(model, output_dict, target_dict):                                
     """velocity regression losses only, used bce in HPT"""                                                 ## frame_roll
@@ -94,6 +103,17 @@ def kim_velocity_bce_l1(model, output_dict, target_dict):
     onset_target = target_dict['velocity_roll'] / 128
     l1_loss = _masked_l1(output_dict['velocity_output'], onset_target, target_dict['onset_roll'])
     return theta * bce_loss + (1 - theta) * l1_loss
+
+
+def velocity_bce_tri(model, output_dict, target_dict,
+                     onset_weight=1.0, frame_weight=1.0, global_weight=0.1):
+    """Combine BCE over onset mask, frame mask, and an unmasked global term."""
+    pred = output_dict['velocity_output']
+    target = target_dict['velocity_roll'] / 128
+    onset_loss = bce(pred, target, target_dict['onset_roll'])
+    frame_loss = bce(pred, target, target_dict['frame_roll'])
+    global_loss = _bce_unmasked(pred, target)
+    return onset_weight * onset_loss + frame_weight * frame_loss + global_weight * global_loss
 
 # def velocity_mae(model, output_dict, target_dict):
 #     """Test the performance"""
@@ -166,6 +186,8 @@ def get_loss_func(loss_type):
         return velocity_mse
     elif loss_type == 'kim_bce_l1':
         return kim_velocity_bce_l1
+    elif loss_type == 'velocity_bce_tri':
+        return velocity_bce_tri
     # elif loss_type == 'velocity_mae':
     #     return velocity_mae
     # elif loss_type == 'velocity_std':

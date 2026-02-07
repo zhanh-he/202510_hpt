@@ -55,6 +55,7 @@ Our Development:
 import torch
 import torch.nn as nn
 import torchaudio
+from nnAudio.Spectrogram import CQT as NNAudioCQT
 import numpy as np
 import pandas as pd
 import os, time, argparse, h5py
@@ -79,9 +80,62 @@ def get_feature_extractor_and_bins(audio_feature, sample_rate, fft_size, frames_
     elif audio_feature == "ntot":
         feature_extractor = PsychoFeatureExtractor(sample_rate=sample_rate, fft_size=fft_size, frames_per_second=frames_per_second, db_max=96.0, return_mode="ntot")
         freq_bins = 1
+    elif audio_feature == "cqt":
+        feature_extractor = CQTFeatureExtractor(
+            sample_rate=sample_rate,
+            frames_per_second=frames_per_second,
+            fallback_fft_size=fft_size,
+        )
+        freq_bins = feature_extractor.freq_bins
     else:
         raise ValueError(f"Invalid audio_feature: {audio_feature}")
     return feature_extractor, freq_bins
+
+
+class CQTFeatureExtractor(nn.Module):
+    """Constant-Q transform front-end compatible with HPPNet."""
+
+    def __init__(
+        self,
+        sample_rate: int,
+        frames_per_second: int,
+        bins_per_semitone: int = 4,
+        n_pitches: int = 88,
+        top_db: float = 80.0,
+        fallback_fft_size: int = 2048,
+    ) -> None:
+        super().__init__()
+        if bins_per_semitone <= 0:
+            raise ValueError("bins_per_semitone must be positive.")
+        self.sample_rate = sample_rate
+        self.frames_per_second = frames_per_second
+        self.hop_length = max(1, int(round(sample_rate / frames_per_second)))
+        self.bins_per_octave = bins_per_semitone * 12
+        self.freq_bins = n_pitches * bins_per_semitone
+        extra = 2 ** (1.0 / self.bins_per_octave)
+        fmin = 27.5 / extra
+
+        self.amplitude_to_db = torchaudio.transforms.AmplitudeToDB(
+            stype="magnitude", top_db=top_db
+        )
+        self.backend: Optional[str] = None
+
+        self.cqt = NNAudioCQT(
+            sr=sample_rate,
+            hop_length=self.hop_length,
+            fmin=fmin,
+            n_bins=self.freq_bins,
+            bins_per_octave=self.bins_per_octave,
+            output_format="Magnitude",
+        )
+
+    def forward(self, wav: torch.Tensor) -> torch.Tensor:
+        spec = self.cqt(wav)
+        if torch.is_complex(spec):
+            spec = torch.abs(spec)
+        spec = torch.clamp(spec, min=1e-10)
+        spec_db = self.amplitude_to_db(spec)
+        return spec_db
 
 
 class PsychoFeatureExtractor(nn.Module):
@@ -215,7 +269,7 @@ class LogMelExtractor(nn.Module):
     def __init__(self, sample_rate=44100, fft_size=1024, frames_per_second=86,
                  return_mode: Literal["logmel", "mel"] = "logmel"):
         super().__init__()
-        self.mel_bins = 229
+        self.mel_bins = 128 #229
         # Alt settings:
         # sample_rate=22050, fft_size=1024, frames_per_second=86  # BeatThis
         # sample_rate=16000, fft_size=2048, frames_per_second=100; self.mel_bins=229  # HPT

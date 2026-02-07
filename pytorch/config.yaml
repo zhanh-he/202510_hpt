@@ -1,7 +1,7 @@
 wandb:
   project: "202510_hpt"
   name: "${feature.audio_feature}-${model.name}-ext${model.input2}${model.input3}-sr${feature.sample_rate}-${wandb.comment}" # -iter${exp.total_iteration}
-  comment: # "mel229"
+  comment: "mel128"
   log_velocity_interval: ${exp.eval_iteration}  # Set 0/null to disable WandB velocity roll images
 
 exp:
@@ -12,7 +12,7 @@ exp:
   resume_iteration: 0
   total_iteration: 120_000 # 200_000 # 300_000 # 360_000
   save_iteration: 10_000   # 6_000 # 6_000
-  eval_iteration: 10_000   # 6_000 # 6_000
+  eval_iteration: 3_000   # 6_000 # 6_000
 
   learning_rate: 1e-4 # 3e-4 # 1e-4
   optim: "adam" # "adam", "ranger", Ranger: default betas=(0.9, 0.999), eps=1e-08, weight_decay=0.
@@ -71,10 +71,18 @@ dataset:
 
 model:
   type: "velo" # "notes"
-  name: "Single_Velocity_HPT" # 'Single_Velocity_HPT', 'Dual_Velocity_HPT', 'Triple_Velocity_HPT', 'FiLMUNetPretrained'
+  # -------------------------------------------------------------------------
+  # name options:
+  #   Single_Velocity_HPT / Dual_Velocity_HPT / Triple_Velocity_HPT
+  #   DynestAudioCNN
+  #   FiLMUNetPretrained  -> set input2=frame (or onset) and point pretrained_checkpoint below
+  #   HPPNet_SP           -> audio-only HPPNet (velocity head only, no input2/input3)
+  # -------------------------------------------------------------------------
+  name: "Single_Velocity_HPT"
   input2: null # onset, offset, frame, exframe, null - None
   input3: null # onset, offset, frame, exframe, null - None
   pretrained_checkpoint: "/media/datadisk/home/22828187/zhanh/202510_hpt_data/workspaces/checkpoints/FiLMUNetPretrained+frame/1000000_iterations.pth"
+  hppnet_model_size: 128
 
 
 post:
