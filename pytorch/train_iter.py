@@ -58,12 +58,18 @@ def log_velocity_rolls(cfg, iteration, batch_output_dict, batch_data_dict):
 
     velocity_scale = getattr(cfg.feature, "velocity_scale", 128)
     pred_img = pred[0].detach().cpu().numpy()
-    pred_img = np.clip(pred_img / velocity_scale, 0.0, 1.0)
+    pred_max = float(np.max(pred_img))
+    pred_min = float(np.min(pred_img))
+    if pred_max > 1.0 + 1e-3 or pred_min < -1e-3:
+        # Fall back to scaling if the model outputs raw velocity values.
+        pred_vis = np.clip(pred_img / velocity_scale, 0.0, 1.0)
+    else:
+        pred_vis = np.clip(pred_img, 0.0, 1.0)
     target_img = np.clip(target[0].detach().cpu().numpy() / velocity_scale, 0.0, 1.0)
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
     specs = [
-        ("Prediction", pred_img),
+        ("Prediction", pred_vis),
         ("Ground Truth", target_img),
     ]
     for ax, (title, data) in zip(axes, specs):
