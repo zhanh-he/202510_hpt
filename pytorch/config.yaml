@@ -11,13 +11,13 @@ exp:
   # workspace: "/media/mengh/SharedData/zhanh/202510_hpt_data/workspaces" #mengh
   resume_iteration: 0
   total_iteration: 120_000 # 200_000 # 300_000 # 360_000
-  save_iteration: 10_000   # 6_000 # 6_000
-  eval_iteration: 3_000   # 6_000 # 6_000
+  save_iteration: 3_000    # 6_000 # 6_000
+  eval_iteration: 3_000    # 6_000 # 6_000
 
   learning_rate: 1e-4 # 3e-4 # 1e-4
   optim: "adam" # "adam", "ranger", Ranger: default betas=(0.9, 0.999), eps=1e-08, weight_decay=0.
   decay: True # False
-  reduce_iteration: 10_000 # 6_000
+  reduce_iteration: 12_000 # 6_000
   loss_type: "velocity_bce"
   kim_loss_alpha: 0.5  # Weight of BCE term in Kim et al. 2024 BCE+L1 loss
   random_seed: 86

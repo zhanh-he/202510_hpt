@@ -5,6 +5,7 @@ import logging
 import torch
 import torch.utils.data
 import matplotlib.pyplot as plt
+import numpy as np
 
 # from torch_optimizer import Ranger
 from torch.optim import Adam
@@ -55,8 +56,10 @@ def log_velocity_rolls(cfg, iteration, batch_output_dict, batch_data_dict):
     if pred is None or target is None:
         return
 
+    velocity_scale = getattr(cfg.feature, "velocity_scale", 128)
     pred_img = pred[0].detach().cpu().numpy()
-    target_img = target[0].detach().cpu().numpy() / 128.0
+    pred_img = np.clip(pred_img / velocity_scale, 0.0, 1.0)
+    target_img = np.clip(target[0].detach().cpu().numpy() / velocity_scale, 0.0, 1.0)
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
     specs = [
@@ -64,7 +67,14 @@ def log_velocity_rolls(cfg, iteration, batch_output_dict, batch_data_dict):
         ("Ground Truth", target_img),
     ]
     for ax, (title, data) in zip(axes, specs):
-        im = ax.imshow(data.T, aspect='auto', origin='lower', interpolation='nearest')
+        im = ax.imshow(
+            data.T,
+            aspect='auto',
+            origin='lower',
+            interpolation='nearest',
+            vmin=0.0,
+            vmax=1.0,
+        )
         ax.set_title(title)
         ax.set_xlabel("Frame")
         ax.set_ylabel("Key")
