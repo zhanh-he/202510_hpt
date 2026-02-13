@@ -1,18 +1,32 @@
+import argparse
 import os
+import time
 import numpy as np
 import h5py
 import csv
 import librosa
 import logging
 
-try:
-    import sox  # type: ignore
-except ImportError:
-    sox = None
+from hydra import compose, initialize
 
-from utilities import (create_folder, int16_to_float32, traverse_folder, 
-    pad_truncate_sequence, TargetProcessor, write_events_to_midi, 
-    plot_waveform_midi_targets)
+from utilities import (
+    TargetProcessor,
+    create_folder,
+    create_logging,
+    float32_to_int16,
+    get_filename,
+    int16_to_float32,
+    pad_truncate_sequence,
+    plot_waveform_midi_targets,
+    read_metadata,
+    read_midi,
+    traverse_folder,
+    write_events_to_midi,
+)
+
+
+def _sr_tag(cfg):
+    return f"sr{int(cfg.feature.sample_rate)}"
 
 class Maestro_Dataset(object):
     def __init__(self, cfg):
@@ -251,51 +265,252 @@ class SMD_Dataset(object):
         return data_dict
 
 
+def pack_maestro_dataset_to_hdf5(cfg):
+    dataset_dir = cfg.dataset.maestro_dir
+    csv_path = os.path.join(dataset_dir, "maestro-v3.0.0.csv")
+    dataset_name = f"maestro_{_sr_tag(cfg)}"
+    waveform_hdf5s_dir = os.path.join(cfg.exp.workspace, "hdf5s", dataset_name)
+    logs_dir = os.path.join(cfg.exp.workspace, "logs", f"{get_filename(__file__)}_{dataset_name}")
+    create_logging(logs_dir, filemode="w")
+    logging.info(f"Packing MAESTRO dataset: {dataset_dir}")
+
+    meta_dict = read_metadata(csv_path)
+    audios_num = len(meta_dict["canonical_composer"])
+    logging.info(f"Total audios number: {audios_num}")
+
+    feature_time = time.time()
+    for n in range(audios_num):
+        logging.info(f"{n}: {meta_dict['midi_filename'][n]}")
+
+        midi_path = os.path.join(dataset_dir, meta_dict["midi_filename"][n])
+        midi_dict = read_midi(midi_path, "maestro")
+
+        audio_path = os.path.join(dataset_dir, meta_dict["audio_filename"][n])
+        audio, _ = librosa.core.load(audio_path, sr=cfg.feature.sample_rate, mono=True)
+
+        packed_hdf5_path = os.path.join(
+            waveform_hdf5s_dir,
+            f"{os.path.splitext(meta_dict['audio_filename'][n])[0]}.h5",
+        )
+        create_folder(os.path.dirname(packed_hdf5_path))
+
+        with h5py.File(packed_hdf5_path, "w") as hf:
+            hf.attrs.create(
+                "canonical_composer",
+                data=meta_dict["canonical_composer"][n].encode(),
+                dtype="S100",
+            )
+            hf.attrs.create(
+                "canonical_title",
+                data=meta_dict["canonical_title"][n].encode(),
+                dtype="S100",
+            )
+            hf.attrs.create("split", data=meta_dict["split"][n].encode(), dtype="S20")
+            hf.attrs.create("year", data=meta_dict["year"][n].encode(), dtype="S10")
+            hf.attrs.create(
+                "midi_filename", data=meta_dict["midi_filename"][n].encode(), dtype="S100"
+            )
+            hf.attrs.create(
+                "audio_filename",
+                data=meta_dict["audio_filename"][n].encode(),
+                dtype="S100",
+            )
+            hf.attrs.create("duration", data=meta_dict["duration"][n], dtype=np.float32)
+
+            hf.create_dataset(
+                name="midi_event",
+                data=[e.encode() for e in midi_dict["midi_event"]],
+                dtype="S100",
+            )
+            hf.create_dataset(
+                name="midi_event_time", data=midi_dict["midi_event_time"], dtype=np.float32
+            )
+            hf.create_dataset(
+                name="waveform", data=float32_to_int16(audio), dtype=np.int16
+            )
+
+    logging.info(f"Write HDF5 to {waveform_hdf5s_dir}")
+    logging.info(f"Time: {time.time() - feature_time:.3f} s")
+
+
+def pack_maps_dataset_to_hdf5(cfg):
+    dataset_dir = cfg.dataset.maps_dir
+    pianos = ["ENSTDkCl", "ENSTDkAm"]
+    dataset_name = f"maps_{_sr_tag(cfg)}"
+    waveform_hdf5s_dir = os.path.join(cfg.exp.workspace, "hdf5s", dataset_name)
+    logs_dir = os.path.join(cfg.exp.workspace, "logs", f"{get_filename(__file__)}_{dataset_name}")
+    create_logging(logs_dir, filemode="w")
+    logging.info(f"Packing MAPS dataset: {dataset_dir}")
+
+    feature_time = time.time()
+    count = 0
+
+    for piano in pianos:
+        sub_dir = os.path.join(dataset_dir, piano, "MUS")
+        audio_names = [
+            os.path.splitext(name)[0]
+            for name in os.listdir(sub_dir)
+            if os.path.splitext(name)[-1] == ".mid"
+        ]
+
+        for audio_name in audio_names:
+            print(f"{count}: {audio_name}")
+            audio_path = f"{os.path.join(sub_dir, audio_name)}.wav"
+            midi_path = f"{os.path.join(sub_dir, audio_name)}.mid"
+
+            audio, _ = librosa.core.load(audio_path, sr=cfg.feature.sample_rate, mono=True)
+            midi_dict = read_midi(midi_path, "maps")
+            duration = librosa.get_duration(y=audio, sr=cfg.feature.sample_rate)
+
+            packed_hdf5_path = os.path.join(waveform_hdf5s_dir, f"{audio_name}.h5")
+            create_folder(os.path.dirname(packed_hdf5_path))
+
+            with h5py.File(packed_hdf5_path, "w") as hf:
+                hf.attrs.create("split", data="test".encode(), dtype="S20")
+                hf.attrs.create("duration", data=np.float32(duration))
+                hf.attrs.create("midi_filename", data=f"{audio_name}.mid".encode(), dtype="S100")
+                hf.attrs.create("audio_filename", data=f"{audio_name}.wav".encode(), dtype="S100")
+                hf.create_dataset(
+                    name="midi_event",
+                    data=[e.encode() for e in midi_dict["midi_event"]],
+                    dtype="S100",
+                )
+                hf.create_dataset(
+                    name="midi_event_time",
+                    data=midi_dict["midi_event_time"],
+                    dtype=np.float32,
+                )
+                hf.create_dataset(
+                    name="waveform", data=float32_to_int16(audio), dtype=np.int16
+                )
+            count += 1
+
+    logging.info(f"Write HDF5 to {waveform_hdf5s_dir}")
+    logging.info(f"Total files processed: {count}")
+    logging.info(f"Time: {time.time() - feature_time:.3f} s")
+
+
+def pack_smd_dataset_to_hdf5(cfg):
+    dataset_dir = cfg.dataset.smd_dir
+    dataset_name = f"smd_{_sr_tag(cfg)}"
+    waveform_hdf5s_dir = os.path.join(cfg.exp.workspace, "hdf5s", dataset_name)
+    logs_dir = os.path.join(cfg.exp.workspace, "logs", f"{get_filename(__file__)}_{dataset_name}")
+    create_logging(logs_dir, filemode="w")
+    logging.info(f"Packing SMD dataset: {dataset_dir}")
+
+    feature_time = time.time()
+    count = 0
+
+    audio_midi_pairs = [
+        (os.path.splitext(name)[0], os.path.splitext(name)[-1].lower())
+        for name in os.listdir(dataset_dir)
+        if os.path.splitext(name)[-1].lower() in [".mid", ".mp3"]
+    ]
+    audio_midi_pairs = {name: ext for name, ext in audio_midi_pairs}
+
+    excluded = {"Beethoven_WoO080_001_20081107-SMD"}
+    for audio_name, ext in audio_midi_pairs.items():
+        if audio_name in excluded:
+            logging.info(f"Skipping excluded SMD track: {audio_name}")
+            continue
+        print(f"{count}: {audio_name}")
+        audio_path = os.path.join(dataset_dir, f"{audio_name}.mp3")
+        midi_path = os.path.join(dataset_dir, f"{audio_name}.mid")
+
+        audio, _ = librosa.core.load(audio_path, sr=cfg.feature.sample_rate, mono=True)
+        midi_dict = read_midi(midi_path, "smd")
+        duration = librosa.get_duration(y=audio, sr=cfg.feature.sample_rate)
+
+        packed_hdf5_path = os.path.join(waveform_hdf5s_dir, f"{audio_name}.h5")
+        create_folder(os.path.dirname(packed_hdf5_path))
+
+        with h5py.File(packed_hdf5_path, "w") as hf:
+            hf.attrs.create("split", data="test".encode(), dtype="S20")
+            hf.attrs.create("duration", data=np.float32(duration))
+            hf.attrs.create("midi_filename", data=f"{audio_name}.mid".encode(), dtype="S100")
+            hf.attrs.create("audio_filename", data=f"{audio_name}.mp3".encode(), dtype="S100")
+            hf.create_dataset(
+                name="midi_event",
+                data=[e.encode() for e in midi_dict["midi_event"]],
+                dtype="S100",
+            )
+            hf.create_dataset(
+                name="midi_event_time",
+                data=midi_dict["midi_event_time"],
+                dtype=np.float32,
+            )
+            hf.create_dataset(
+                name="waveform", data=float32_to_int16(audio), dtype=np.int16
+            )
+        count += 1
+
+    logging.info(f"Write HDF5 to {waveform_hdf5s_dir}")
+    logging.info(f"Total files processed: {count}")
+    logging.info(f"Time taken: {time.time() - feature_time:.3f} s")
+
+
 class Augmentor(object):
     def __init__(self, cfg):
         """Data augmentor."""
-        
+        self.cfg = cfg
         self.sample_rate = cfg.feature.sample_rate
         self.random_state = np.random.RandomState(cfg.exp.random_seed)
-        self._has_sox = sox is not None
-        if not self._has_sox:
-            logging.getLogger(__name__).warning(
-                "python-sox not available; disabling Augmentor effects. "
-                "Install `sox` and `pip install sox` to enable waveform augmentation."
-            )
 
     def augment(self, x):
-        if not self._has_sox:
-            return x
-
         clip_samples = len(x)
-        logger = logging.getLogger('sox')
-        logger.propagate = False
+        aug_x = np.asarray(x, dtype=np.float32).copy()
 
-        tfm = sox.Transformer()
-        tfm.set_globals(verbosity=0)
+        # Random time-stretch
+        if self.random_state.rand() < 0.5:
+            rate = float(self.random_state.uniform(0.9, 1.1))
+            aug_x = librosa.effects.time_stretch(aug_x, rate)
 
-        tfm.pitch(self.random_state.uniform(-0.1, 0.1, 1)[0])
-        tfm.contrast(self.random_state.uniform(0, 100, 1)[0])
+        # Random pitch shift (±0.5 semitone)
+        if self.random_state.rand() < 0.5:
+            steps = float(self.random_state.uniform(-0.5, 0.5))
+            aug_x = librosa.effects.pitch_shift(
+                aug_x, self.sample_rate, n_steps=steps, bins_per_octave=12
+            )
 
-        tfm.equalizer(frequency=self.loguniform(32, 4096, 1)[0], 
-            width_q=self.random_state.uniform(1, 2, 1)[0], 
-            gain_db=self.random_state.uniform(-30, 10, 1)[0])
+        aug_x = self._random_eq(aug_x)
+        aug_x = self._simple_reverb(aug_x)
 
-        tfm.equalizer(frequency=self.loguniform(32, 4096, 1)[0], 
-            width_q=self.random_state.uniform(1, 2, 1)[0], 
-            gain_db=self.random_state.uniform(-30, 10, 1)[0])
-        
-        tfm.reverb(reverberance=self.random_state.uniform(0, 70, 1)[0])
-
-        aug_x = tfm.build_array(input_array=x, sample_rate_in=self.sample_rate)
+        noise_scale = float(self.random_state.uniform(0.001, 0.01))
+        aug_x = aug_x + self.random_state.normal(0.0, noise_scale, size=len(aug_x))
+        gain = float(self.random_state.uniform(0.8, 1.2))
+        aug_x *= gain
+        aug_x = np.clip(aug_x, -1.0, 1.0)
         aug_x = pad_truncate_sequence(aug_x, clip_samples)
-        
         return aug_x
 
-    def loguniform(self, low, high, size):
-        return np.exp(self.random_state.uniform(np.log(low), np.log(high), size))
+    def _random_eq(self, waveform: np.ndarray) -> np.ndarray:
+        if self.random_state.rand() < 0.3:
+            return waveform
+        fft = np.fft.rfft(waveform)
+        freqs = np.fft.rfftfreq(len(waveform), 1.0 / self.sample_rate)
+        response = np.ones_like(freqs)
+        num_bands = self.random_state.randint(1, 4)
+        for _ in range(num_bands):
+            center = self.random_state.uniform(80.0, self.sample_rate / 2.0)
+            width = self.random_state.uniform(100.0, 2000.0)
+            gain = self.random_state.uniform(0.5, 1.5)
+            response *= 1 + (gain - 1) * np.exp(-0.5 * ((freqs - center) / width) ** 2)
+        fft *= response
+        shaped = np.fft.irfft(fft, n=len(waveform))
+        return shaped.real
 
+    def _simple_reverb(self, waveform: np.ndarray) -> np.ndarray:
+        if self.random_state.rand() < 0.3:
+            return waveform
+        delay = self.random_state.randint(
+            int(0.01 * self.sample_rate), int(0.05 * self.sample_rate)
+        )
+        decay = float(self.random_state.uniform(0.1, 0.5))
+        kernel = np.zeros(delay + 1, dtype=np.float32)
+        kernel[0] = 1.0
+        kernel[-1] = decay
+        reverbed = np.convolve(waveform, kernel, mode="full")
+        return reverbed[: len(waveform)]
 
 class Sampler(object):
     def __init__(self, cfg, split, is_eval=None):
@@ -454,3 +669,27 @@ def collate_fn(list_data_dict):
         np_data_dict[key] = np.array([data_dict[key] for data_dict in list_data_dict])
     
     return np_data_dict
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Dataset packing utilities")
+    subparsers = parser.add_subparsers(dest="mode", required=True, help="Select a mode of operation")
+    subparsers.add_parser("pack_maestro_dataset_to_hdf5", help="Pack Maestro dataset to HDF5")
+    subparsers.add_parser("pack_maps_dataset_to_hdf5", help="Pack MAPS dataset to HDF5")
+    subparsers.add_parser("pack_smd_dataset_to_hdf5", help="Pack SMD dataset to HDF5")
+
+    args, hydra_overrides = parser.parse_known_args()
+
+    initialize(config_path="./", job_name="features", version_base=None)
+    cfg = compose(config_name="config", overrides=hydra_overrides)
+
+    mode_to_function = {
+        "pack_maestro_dataset_to_hdf5": pack_maestro_dataset_to_hdf5,
+        "pack_maps_dataset_to_hdf5": pack_maps_dataset_to_hdf5,
+        "pack_smd_dataset_to_hdf5": pack_smd_dataset_to_hdf5,
+    }
+
+    if args.mode in mode_to_function:
+        mode_to_function[args.mode](cfg)
+    else:
+        raise ValueError(f"Invalid mode '{args.mode}'. Use --help for available modes.")

@@ -1,70 +1,102 @@
+import argparse
 import inspect
-import inspect
+import csv
 import os
+import sys
 import time
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import h5py
 import numpy as np
-import pickle
 import torch
 from hydra import compose, initialize
 from tqdm import tqdm
 
-from utilities import (
-    TargetProcessor,
-    RegressionPostProcessor,
-    OnsetsFramesPostProcessor,
-    create_folder,
-    get_filename,
-    get_model_name,
-    int16_to_float32,
-    resolve_hdf5_dir,
-    traverse_folder,
-    write_events_to_midi,
-)
 from pytorch_utils import forward, forward_velo
 from model_DynEst import DynestAudioCNN
 from model_FilmUnet import FiLMUNetPretrained
 from model_HPT import Dual_Velocity_HPT, Single_Velocity_HPT, Triple_Velocity_HPT
+from utilities import (
+    OnsetsFramesPostProcessor,
+    RegressionPostProcessor,
+    TargetProcessor,
+    check_duration_alignment,
+    collect_audio_midi_pairs,
+    create_folder,
+    get_filename,
+    get_model_name,
+    int16_to_float32,
+    iteration_label_from_path,
+    load_mono_audio,
+    note_events_to_velocity_roll,
+    original_score_events,
+    pick_velocity_from_roll,
+    prepare_aux_rolls,
+    read_midi,
+    resolve_audio_midi_pair,
+    resolve_hdf5_dir,
+    select_condition_roll,
+    traverse_folder,
+    write_events_to_midi,
+)
+
+KIM_CSV_FIELDS = [
+    "test_h5",
+    "frame_max_error",
+    "frame_max_std",
+    "f1_score",
+    "precision",
+    "recall",
+    "frame_mask_f1",
+    "frame_mask_precision",
+    "frame_mask_recall",
+    "onset_masked_error",
+    "onset_masked_std",
+]
+
 
 class TranscriptionBase:
     def __init__(self, checkpoint_path, cfg):
         self.cfg = cfg
-        self.device = torch.device('cuda') if cfg.exp.cuda and torch.cuda.is_available() else torch.device('cpu')
-        self.segment_samples = int(cfg.feature.sample_rate * cfg.feature.segment_seconds) # 16000*10
-        self.segment_frames = int(round(cfg.feature.frames_per_second * cfg.feature.segment_seconds)) + 1 # 100*10 + 1 
-        
-        # Initialize and load model
+        self.device = (
+            torch.device("cuda") if cfg.exp.cuda and torch.cuda.is_available() else torch.device("cpu")
+        )
+        self.segment_samples = int(cfg.feature.sample_rate * cfg.feature.segment_seconds)
+        self.segment_frames = int(round(cfg.feature.frames_per_second * cfg.feature.segment_seconds)) + 1
+
         model_cls = eval(cfg.model.name)
         sig = inspect.signature(model_cls.__init__)
         params = [
-            p for p in list(sig.parameters.values())[1:]
-            if p.kind in (
+            p
+            for p in list(sig.parameters.values())[1:]
+            if p.kind
+            in (
                 inspect.Parameter.POSITIONAL_ONLY,
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
                 inspect.Parameter.KEYWORD_ONLY,
             )
         ]
         names = {p.name for p in params}
-        if {'frames_per_second', 'classes_num'}.issubset(names):
+        if {"frames_per_second", "classes_num"}.issubset(names):
             self.model = model_cls(
                 frames_per_second=cfg.feature.frames_per_second,
-                classes_num=cfg.feature.classes_num
+                classes_num=cfg.feature.classes_num,
             )
         else:
             self.model = model_cls(cfg)
         if os.path.getsize(checkpoint_path) == 0:
-            raise ValueError(f"Checkpoint file for Inference is empty: {checkpoint_path}")
+            raise ValueError(f"Checkpoint file for inference is empty: {checkpoint_path}")
 
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        state_dict = checkpoint['model'] if isinstance(checkpoint, dict) and 'model' in checkpoint else checkpoint
+        state_dict = checkpoint["model"] if isinstance(checkpoint, dict) and "model" in checkpoint else checkpoint
         if not isinstance(state_dict, dict):
             raise RuntimeError(f"Unsupported checkpoint format: {checkpoint_path}")
 
         def _strip_prefix(state, prefix):
             keys = list(state.keys())
             if keys and all(k.startswith(prefix) for k in keys):
-                return {k[len(prefix):]: v for k, v in state.items()}
+                return {k[len(prefix) :]: v for k, v in state.items()}
             return state
 
         state_dict = _strip_prefix(state_dict, "module.")
@@ -82,287 +114,529 @@ class TranscriptionBase:
         self.model.to(self.device)
 
     def enframe(self, x, is_audio=True):
-        """Enframe long sequence to short segments.
-        Args:
-          x: (1, audio_samples) or (frames, 88)
-            (x.shape[0], x.shape[1], frames_num of data segment) = (20020 88 1001)
-            (x.shape[0], x.shape[1], samples_num of audio segment) = (1 3200000 160000)
-          segment_length: int, length of each segment
-          is_audio: bool, True if x is audio samples, False if x is frames
-        Returns:
-          batch: (N, segment_samples) or (N, frames_num, 88)
-        """
         segment_length = self.segment_samples if is_audio else self.segment_frames
         assert x.shape[1 if is_audio else 0] % segment_length == 0
-        
+
         batch = [
-            x[:, pointer:pointer + segment_length] if is_audio else x[pointer:pointer + segment_length, :]
+            x[:, pointer : pointer + segment_length] if is_audio else x[pointer : pointer + segment_length, :]
             for pointer in range(0, (x.shape[1] if is_audio else x.shape[0]) - segment_length + 1, segment_length // 2)
         ]
         return np.concatenate(batch, axis=0) if is_audio else np.stack(batch, axis=0)
 
     def deframe(self, x):
-        """Deframe predicted segments to original sequence.
-        Args:
-          x: (N, segment_frames, classes_num)
-        Returns:
-          y: (audio_frames, classes_num)
-        """
         if x.shape[0] == 1:
             return x[0]
-        
+
         x = x[:, :-1, :]
         segment_samples = x.shape[1]
         quarter = max(1, segment_samples // 4)
         three_quarters = segment_samples - quarter
         if three_quarters <= quarter:
             return np.concatenate(x, axis=0)
-        """Remove an extra frame in the end of each segment caused by the
-        'center=True' argument when calculating spectrogram."""
+
         y = [
             x[0, :three_quarters],
             *[x[i, quarter:three_quarters] for i in range(1, x.shape[0] - 1)],
-            x[-1, quarter:]
+            x[-1, quarter:],
         ]
         return np.concatenate(y, axis=0)
 
+
 class VeloTranscription(TranscriptionBase):
     def transcribe(self, audio, input2=None, input3=None, midi_path=None):
-        """Transcribe audio into velocity predictions.
-        Args:
-          audio: (audio_samples,) - 1st input
-          input2: extra input - 2nd
-          input3: extra input - 3rd
-          midi_path: str, path to write out the transcribed MIDI.
-        Returns:
-          transcribed_dict, dict: {'velocity_output': (N, segment_frames, classes_num), ...}
-        """
-        # Pad audio to be evenly divided by segment_samples
-        audio = audio[None, :]                                                          # (1, audio_samples)
-        audio_len = audio.shape[1] # audio (samples)                                           # if audio length is 306_0000
-        audio_segments_num = int(np.ceil(audio_len / self.segment_samples))               # ceil 306_0000/(16000x10) = ceil(19.125) = 20 segments
-        pad_audio_len = audio_segments_num * self.segment_samples - audio_len         # padding = 20 * 16_0000 - 306_0000
-        pad_audio = np.pad(audio, ((0, 0), (0, pad_audio_len)), mode='constant')  
-        # pad_audio = np.concatenate((audio, np.zeros((1, pad_audio_samples))), axis=1)   # pad audio to desired length
-        audio_segments = self.enframe(pad_audio, is_audio=True)                         # enframe audio to segments
+        audio = audio[None, :]
+        audio_len = audio.shape[1]
+        audio_segments_num = int(np.ceil(audio_len / self.segment_samples))
+        pad_audio_len = audio_segments_num * self.segment_samples - audio_len
+        pad_audio = np.pad(audio, ((0, 0), (0, pad_audio_len)), mode="constant")
+        audio_segments = self.enframe(pad_audio, is_audio=True)
 
         def process_extra_input(aux_input, audio_segments_num):
-            """Process and pad an auxiliary input to match the audio segments."""
             if aux_input is None:
                 return None
-            aux_len = aux_input.shape[0] # input (frames)
+            aux_len = aux_input.shape[0]
             aux_segments_num = int(np.ceil(aux_len / self.segment_frames))
-
-            # We expect audio & extra iput segments same amount, if not, pad input until being same
             if aux_segments_num != audio_segments_num:
                 aux_segments_num = audio_segments_num
-            
             pad_aux_len = aux_segments_num * self.segment_frames - aux_len
-            pad_aux = np.pad(aux_input, ((0, pad_aux_len), (0, 0)), mode='constant')
+            pad_aux = np.pad(aux_input, ((0, pad_aux_len), (0, 0)), mode="constant")
             aux_segments = self.enframe(pad_aux, is_audio=False)
             return aux_segments
-        
+
         input2_segments = process_extra_input(input2, audio_segments_num)
         input3_segments = process_extra_input(input3, audio_segments_num)
 
-        # Exact velocity from the output only
         output_dict = forward_velo(self.model, audio_segments, input2_segments, input3_segments, batch_size=1)
-        output_dict['velocity_output'] = self.deframe(output_dict['velocity_output'])[0:audio_len]
-        """
-        output_dict: {
-        'reg_onset_output': (segment_frames, classes_num),   X
-        'reg_offset_output': (segment_frames, classes_num),  X
-        'velocity_output': (N, segment_frames, classes_num),
-        ...}
-        """
-        # return output_dict
+        output_dict["velocity_output"] = self.deframe(output_dict["velocity_output"])[0:audio_len]
         return {
-            'output_dict': output_dict,
+            "output_dict": output_dict,
         }
 
+
 class PianoTranscription(TranscriptionBase):
-    """
-    Transcribe audio into note events predictions.
-    Args:
-        audio: (audio_samples,)
-        midi_path: str, path to write out the transcribed MIDI.
-    Returns:
-        transcribed_dict, dict: {'output_dict':, ..., 'est_note_events': ..., 'est_pedal_events': ...}
-    """
     def transcribe(self, audio, midi_path):
-        # Pad audio to be evenly divided by segment_samples
-        audio = audio[None, :] # (1, audio_samples)
+        audio = audio[None, :]
         audio_len = audio.shape[1]
         segments_num = int(np.ceil(audio_len / self.segment_samples))
         pad_len = segments_num * self.segment_samples - audio_len
-        pad_audio = np.pad(audio, ((0, 0), (0, pad_len)), mode='constant')
-        # pad_audio = np.concatenate((audio, np.zeros((1, pad_len))), axis=1)
-        segments = self.enframe(pad_audio, is_audio=True) # (N, segment_samples)
-        
-        # Exact all outputs
-        output_dict = forward(self.model, segments, batch_size=1) # {'reg_onset_output': (N, segment_frames, classes_num), ...}
+        pad_audio = np.pad(audio, ((0, 0), (0, pad_len)), mode="constant")
+        segments = self.enframe(pad_audio, is_audio=True)
+
+        output_dict = forward(self.model, segments, batch_size=1)
         for key in output_dict.keys():
             output_dict[key] = self.deframe(output_dict[key])[0:audio_len]
-        """
-        output_dict: {
-        'reg_onset_output': (segment_frames, classes_num),  Y
-        'reg_offset_output': (segment_frames, classes_num), Y
-        'frame_output': (segment_frames, classes_num),      Y
-        'velocity_output': (segment_frames, classes_num),   Y
-        'reg_pedal_onset_output': (segment_frames, 1),      Y
-        'reg_pedal_offset_output': (segment_frames, 1),     Y
-        'pedal_frame_output': (segment_frames, 1)           Y
-        ...}
-        """
-        # Post processor
-        if self.post_processor_type == 'regression':
+
+        if self.cfg.post.post_processor_type == "regression":
             post_processor = RegressionPostProcessor(self.cfg)
-        elif self.post_processor_type == 'onsets_frames':
-            """Google's onsets and frames post processing algorithm. Only used 
-            for comparison."""
+        elif self.cfg.post.post_processor_type == "onsets_frames":
             post_processor = OnsetsFramesPostProcessor(self.cfg)
-        
+        else:
+            raise ValueError(f"Unknown post processor: {self.cfg.post.post_processor_type}")
+
         est_note_events, est_pedal_events = post_processor.output_dict_to_midi_events(output_dict)
-        
+
         if midi_path:
             write_events_to_midi(0, est_note_events, est_pedal_events, midi_path)
-            print('Write out to {}'.format(midi_path))
+            print(f"Write out to {midi_path}")
 
         return {
-            'output_dict': output_dict,
-            'est_note_events': est_note_events,
-            'est_pedal_events': est_pedal_events
+            "output_dict": output_dict,
+            "est_note_events": est_note_events,
+            "est_pedal_events": est_pedal_events,
         }
 
 
-def infer(cfg):
-    """Perform inference for notes or velocity, depending on cfg.model.type."""
-    # Prepare model name and checkpoint path
-    model_name = get_model_name(cfg)
-    checkpoint_path = os.path.join(cfg.exp.workspace, "checkpoints", model_name, f"{cfg.exp.ckpt_iteration}_iterations.pth")
+def _resolve_checkpoint(cfg, explicit_path: Optional[str]) -> Path:
+    if explicit_path:
+        ckpt = Path(explicit_path)
+        if not ckpt.exists():
+            raise FileNotFoundError(f"Checkpoint override {ckpt} does not exist.")
+        return ckpt
 
-    # Load data paths
+    if cfg.model.name == "FiLMUNetPretrained":
+        ckpt = Path(cfg.model.pretrained_checkpoint)
+        if not ckpt.exists():
+            raise FileNotFoundError(
+                f"Pretrained Kim et al. checkpoint missing at {ckpt}. "
+                "Provide --checkpoint-path or update cfg.model.pretrained_checkpoint."
+            )
+        return ckpt
+
+    if cfg.exp.ckpt_file:
+        ckpt = Path(cfg.exp.ckpt_file)
+        if ckpt.exists():
+            return ckpt
+        raise FileNotFoundError(f"cfg.exp.ckpt_file points to {ckpt}, but the file does not exist.")
+
+    if not cfg.exp.ckpt_iteration:
+        raise ValueError(
+            "cfg.exp.ckpt_iteration is empty. "
+            "Set exp.ckpt_iteration or supply --checkpoint-path when launching the script."
+        )
+
+    model_name = get_model_name(cfg)
+    ckpt = (
+        Path(cfg.exp.workspace)
+        / "checkpoints"
+        / model_name
+        / f"{cfg.exp.ckpt_iteration}_iterations.pth"
+    )
+    if not ckpt.exists():
+        raise FileNotFoundError(f"Could not locate checkpoint at {ckpt}")
+    return ckpt
+
+
+def _make_roll_adapter(cfg, velocity_method: str):
+    def adapter(output_dict, target_dict, context):
+        midi_events_time = context["midi_events_time"]
+        midi_events = context["midi_events"]
+        duration = context["duration"]
+
+        note_events, _ = original_score_events(cfg, midi_events_time, midi_events, duration)
+        pick_velocity_from_roll(note_events, output_dict["velocity_output"], cfg, strategy=velocity_method)
+        pred_roll = note_events_to_velocity_roll(
+            note_events=note_events,
+            frames_num=target_dict["velocity_roll"].shape[0],
+            num_keys=target_dict["velocity_roll"].shape[1],
+            frames_per_second=cfg.feature.frames_per_second,
+            begin_note=cfg.feature.begin_note,
+            velocity_scale=cfg.feature.velocity_scale,
+        )
+        return pred_roll
+
+    return adapter
+
+
+def _predict_velocity_from_alignment(
+    cfg,
+    transcriber: "VeloTranscription",
+    audio: np.ndarray,
+    midi_events_time: np.ndarray,
+    midi_events: List[str],
+    duration: float,
+    velocity_method: str,
+):
+    target_dict, _, _ = prepare_aux_rolls(cfg, midi_events_time, midi_events, duration)
+    input2 = select_condition_roll(target_dict, cfg.model.input2)
+    input3 = select_condition_roll(target_dict, cfg.model.input3)
+
+    transcribed = transcriber.transcribe(audio, input2=input2, input3=input3)
+    velocity_roll = transcribed["output_dict"]["velocity_output"]
+
+    note_events, pedal_events = original_score_events(cfg, midi_events_time, midi_events, duration)
+    pick_velocity_from_roll(note_events, velocity_roll, cfg, strategy=velocity_method)
+
+    pred_roll = note_events_to_velocity_roll(
+        note_events=note_events,
+        frames_num=target_dict["velocity_roll"].shape[0],
+        num_keys=target_dict["velocity_roll"].shape[1],
+        frames_per_second=cfg.feature.frames_per_second,
+        begin_note=cfg.feature.begin_note,
+        velocity_scale=cfg.feature.velocity_scale,
+    )
+    return note_events, pedal_events, target_dict, pred_roll
+
+
+def _transcribe_pair_to_midi(
+    transcriber: VeloTranscription,
+    cfg,
+    audio_path: Path,
+    midi_path: Path,
+    output_path: Path,
+    midi_format: str,
+    velocity_method: str,
+) -> int:
+    audio = load_mono_audio(audio_path, sample_rate=cfg.feature.sample_rate)
+    midi_dict = read_midi(str(midi_path), dataset=midi_format)
+    midi_events_time = np.asarray(midi_dict["midi_event_time"], dtype=float)
+    midi_events = [
+        msg.decode() if isinstance(msg, (bytes, bytearray)) else str(msg)
+        for msg in midi_dict["midi_event"]
+    ]
+
+    note_events, pedal_events, _, _ = _predict_velocity_from_alignment(
+        cfg,
+        transcriber,
+        audio,
+        midi_events_time,
+        midi_events,
+        duration=float(len(audio) / cfg.feature.sample_rate),
+        velocity_method=velocity_method,
+    )
+
+    create_folder(str(output_path.parent))
+    write_events_to_midi(0.0, note_events, pedal_events, str(output_path))
+    return len(note_events)
+
+
+def _process_dataset_file(
+    cfg,
+    transcriber: "VeloTranscription",
+    hdf5_path: str,
+    velocity_method: str,
+    midi_dir: Optional[Path] = None,
+):
+    with h5py.File(hdf5_path, "r") as hf:
+        if hf.attrs["split"].decode() != "test":
+            return None
+        audio = int16_to_float32(hf["waveform"][:])
+        midi_events = [e.decode() for e in hf["midi_event"][:]]
+        midi_events_time = hf["midi_event_time"][:]
+
+    duration = len(audio) / cfg.feature.sample_rate
+    note_events, pedal_events, target_dict, pred_roll = _predict_velocity_from_alignment(
+        cfg,
+        transcriber,
+        audio,
+        midi_events_time,
+        midi_events,
+        duration,
+        velocity_method,
+    )
+
+    if midi_dir:
+        output_path = midi_dir / f"{Path(hdf5_path).stem}.mid"
+        create_folder(str(output_path.parent))
+        write_events_to_midi(0.0, note_events, pedal_events, str(output_path))
+
+    align_len = min(pred_roll.shape[0], target_dict["velocity_roll"].shape[0])
+    output_entry = {
+        "velocity_output": pred_roll[:align_len],
+    }
+    target_entry = {
+        "velocity_roll": target_dict["velocity_roll"][:align_len],
+        "frame_roll": target_dict["frame_roll"][:align_len],
+        "onset_roll": target_dict["onset_roll"][:align_len],
+        "pedal_frame_roll": target_dict["pedal_frame_roll"][:align_len],
+    }
+    return Path(hdf5_path).name, output_entry, target_entry
+
+
+def _export_dataset_midis(cfg, checkpoint_path: Path, iteration_label: str, velocity_method: str) -> Path:
+    transcriber = VeloTranscription(checkpoint_path=str(checkpoint_path), cfg=cfg)
     hdf5s_dir = resolve_hdf5_dir(cfg.exp.workspace, cfg.dataset.test_set, cfg.feature.sample_rate)
     _, hdf5_paths = traverse_folder(hdf5s_dir)
 
-    # Saving Probabilities Folder
-    probs_dir = os.path.join(cfg.exp.workspace, f"probs_{cfg.model.type}", cfg.dataset.test_set, model_name, f"{cfg.exp.ckpt_iteration}_iterations")
-    create_folder(probs_dir)
+    output_dir = (
+        Path(cfg.exp.workspace)
+        / "midi_outputs"
+        / cfg.dataset.test_set
+        / get_model_name(cfg)
+        / f"{iteration_label}_iterations"
+    )
+    create_folder(str(output_dir))
 
-    # Initialize the appropriate transcriptor
-    transcriptor = {"notes": PianoTranscription, "velo": VeloTranscription}[cfg.model.type](checkpoint_path=checkpoint_path, cfg=cfg)
-
-    # Perform inference on each HDF5 file in the test set
-    progress_bar = tqdm(hdf5_paths, desc=f"Proc {cfg.exp.ckpt_iteration} Ckpt", unit="file", ncols=80)
-    for hdf5_path in progress_bar:
-        with h5py.File(hdf5_path, 'r') as hf:
-            if hf.attrs['split'].decode() == 'test':
-
-                # Load audio and MIDI events
-                audio = int16_to_float32(hf['waveform'][:])
-                midi_events = [e.decode() for e in hf['midi_event'][:]]
-                midi_events_time = hf['midi_event_time'][:]
-
-                # Process ground truths
-                segment_seconds = len(audio) / cfg.feature.sample_rate
-                target_processor = TargetProcessor(segment_seconds=segment_seconds, cfg=cfg)
-                target_dict, note_events, pedal_events = target_processor.process(start_time=0, midi_events_time=midi_events_time, midi_events=midi_events, extend_pedal=True)
-
-                # Extract reference data from note events
-                ref_on_off_pairs = np.array([[event['onset_time'], event['offset_time']] for event in note_events])
-                ref_midi_notes = np.array([event['midi_note'] for event in note_events])
-                ref_velocity = np.array([event['velocity'] for event in note_events])
-
-                # Transcribe audio
-                if cfg.model.type == "velo":
-
-                    # Generate exframe_roll
-                    target_dict['exframe_roll'] = target_dict['frame_roll'] * (1 - target_dict['onset_roll'])
-                    
-                    # Additional inputs for velocity transcription
-                    input2 = target_dict.get(f"{cfg.model.input2}_roll") if cfg.model.input2 else None
-                    input3 = target_dict.get(f"{cfg.model.input3}_roll") if cfg.model.input3 else None
-                    
-                    transcribed_dict = transcriptor.transcribe(audio, input2, input3, midi_path=None)
-                
-                elif cfg.model.type == "notes":
-
-                    # Notes transcription
-                    transcribed_dict = transcriptor.transcribe(audio, midi_path=None)
-                
-                output_dict = transcribed_dict['output_dict']
-
-                # Prepare total_dict = output & target (groundtruth)
-                total_dict = {key: output_dict[key] for key in output_dict.keys()}
-
-                total_dict.update({
-                    'frame_roll': target_dict['frame_roll'],
-                    'onset_roll': target_dict['onset_roll'],
-                    'offset_roll': target_dict['offset_roll'],
-                    'velocity_roll': target_dict['velocity_roll'],
-                    'reg_onset_roll': target_dict['reg_onset_roll'],
-                    'reg_offset_roll': target_dict['reg_offset_roll'],
-                    'ref_on_off_pairs': ref_on_off_pairs,
-                    'ref_midi_notes': ref_midi_notes,
-                    'ref_velocity': ref_velocity,
-                    'checkpoint_iteration': cfg.exp.ckpt_iteration,
-                })
-
-                # Save the combined data to Probabilities Folder
-                prob_path = os.path.join(probs_dir, f"{get_filename(hdf5_path)}.pkl")
-                create_folder(os.path.dirname(prob_path))
-                pickle.dump(total_dict, open(prob_path, 'wb'))
+    progress = tqdm(sorted(hdf5_paths), desc=f"Proc {iteration_label} Ckpt", unit="file", ncols=80)
+    for hdf5_path in progress:
+        _process_dataset_file(cfg, transcriber, hdf5_path, velocity_method, midi_dir=output_dir)
+    return output_dir
 
 
-if __name__ == '__main__':
-    initialize(config_path="./", job_name="infer", version_base=None)
-    cfg = compose(config_name="config", overrides=sys.argv[1:])
+def run_single_pair_mode(cfg, args) -> None:
+    if not args.input_path:
+        raise ValueError("Single mode requires --input-path pointing to an audio or MIDI file.")
+    checkpoint_path = _resolve_checkpoint(cfg, args.checkpoint_path)
+    transcriber = VeloTranscription(checkpoint_path=str(checkpoint_path), cfg=cfg)
 
+    audio_path, midi_path = resolve_audio_midi_pair(Path(args.input_path))
+    output_path = Path(args.output_path) if args.output_path else audio_path.parent / f"{audio_path.stem}_pred.mid"
+
+    note_count = _transcribe_pair_to_midi(
+        transcriber=transcriber,
+        cfg=cfg,
+        audio_path=audio_path,
+        midi_path=midi_path,
+        output_path=output_path,
+        midi_format=args.midi_format,
+        velocity_method=args.velocity_method,
+    )
+    print(f"[single] Wrote {note_count} notes to {output_path}")
+
+
+def run_folder_mode(cfg, args) -> None:
+    if not args.input_path:
+        raise ValueError("Folder mode requires --input-path pointing to a directory.")
+    folder = Path(args.input_path)
+    pairs = collect_audio_midi_pairs(folder)
+    output_dir = Path(args.output_dir) if args.output_dir else folder / "pred_midis"
+    create_folder(str(output_dir))
+
+    checkpoint_path = _resolve_checkpoint(cfg, args.checkpoint_path)
+    transcriber = VeloTranscription(checkpoint_path=str(checkpoint_path), cfg=cfg)
+
+    for audio_path, midi_path in pairs:
+        out_path = output_dir / f"{audio_path.stem}.mid"
+        note_count = _transcribe_pair_to_midi(
+            transcriber=transcriber,
+            cfg=cfg,
+            audio_path=audio_path,
+            midi_path=midi_path,
+            output_path=out_path,
+            midi_format=args.midi_format,
+            velocity_method=args.velocity_method,
+        )
+        print(f"[folder] {audio_path.name} -> {out_path.name} ({note_count} notes)")
+
+
+def run_dataset_score_mode(cfg, args) -> None:
+    from calculate_scores import eval_from_list, gt_to_note_list
+
+    checkpoint_path = _resolve_checkpoint(cfg, args.checkpoint_path)
+    iteration_label = iteration_label_from_path(checkpoint_path, str(cfg.exp.ckpt_iteration))
+    transcriber = VeloTranscription(checkpoint_path=str(checkpoint_path), cfg=cfg)
+
+    results_dir = (
+        Path(cfg.exp.workspace)
+        / "dataset_score"
+        / cfg.dataset.test_set
+        / get_model_name(cfg)
+        / f"{iteration_label}_iterations"
+    )
+    midi_dir = results_dir / "midis"
+    error_dir = results_dir / "error_dict"
+    create_folder(str(midi_dir))
+    create_folder(str(error_dir))
+
+    csv_path = results_dir / f"{cfg.dataset.test_set}_dataset_score.csv"
+    hdf5s_dir = resolve_hdf5_dir(cfg.exp.workspace, cfg.dataset.test_set, cfg.feature.sample_rate)
+    _, hdf5_paths = traverse_folder(hdf5s_dir)
+
+    device = torch.device("cuda") if cfg.exp.cuda and torch.cuda.is_available() else torch.device("cpu")
     print("=" * 80)
-    print(f"Inference Mode : {cfg.exp.run_infer.upper()}")
+    print("Inference Mode : DATASET_SCORE (single checkpoint)")
     print(f"Model Name     : {get_model_name(cfg)}")
     print(f"Test Set       : {cfg.dataset.test_set}")
-    print(f"Using Device   : {torch.device('cuda') if cfg.exp.cuda and torch.cuda.is_available() else 'cpu'}")
+    print(f"Using Device   : {device}")
+    print(
+        f"Feature Config : {cfg.feature.audio_feature} | sr={cfg.feature.sample_rate} "
+        f"| fps={cfg.feature.frames_per_second} | seg={cfg.feature.segment_seconds}s"
+    )
+    print(f"Checkpoint     : {checkpoint_path}")
+    print(f"MIDI Output    : {midi_dir}")
+    print(f"Results Dir    : {results_dir}")
     print("=" * 80)
 
-    if cfg.exp.run_infer == "single":
-        print(f"Checkpoint     : {cfg.exp.ckpt_iteration}_iterations.pth")
-        t1 = time.time()
-        infer(cfg)
-        print(f"\n[Done] Inference time: {time.time() - t1:.2f} sec")
+    aggregated = {field: [] for field in KIM_CSV_FIELDS if field != "test_h5"}
+    processed = 0
+
+    with open(csv_path, "w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(KIM_CSV_FIELDS)
+
+        progress = tqdm(sorted(hdf5_paths), desc="Dataset Score", unit="file", ncols=80)
+        for hdf5_path in progress:
+            result = _process_dataset_file(
+                cfg,
+                transcriber,
+                hdf5_path,
+                args.velocity_method,
+                midi_dir=midi_dir,
+            )
+            if not result:
+                continue
+
+            audio_name, output_entry, target_entry = result
+            output_list = [output_entry]
+            target_list = [target_entry]
+
+            (
+                frame_max_error,
+                frame_max_std,
+                error_profile,
+                f1,
+                precision,
+                recall,
+                frame_mask_f1,
+                frame_mask_precision,
+                frame_mask_recall,
+            ) = gt_to_note_list(output_list, target_list)
+            onset_masked_error, onset_masked_std = eval_from_list(output_list, target_list)
+
+            error_dict_path = error_dir / f"{Path(audio_name).stem}_dataset_score.npy"
+            np.save(error_dict_path, np.array(error_profile, dtype=object), allow_pickle=True)
+
+            row = [
+                audio_name,
+                frame_max_error,
+                frame_max_std,
+                f1,
+                precision,
+                recall,
+                frame_mask_f1,
+                frame_mask_precision,
+                frame_mask_recall,
+                onset_masked_error,
+                onset_masked_std,
+            ]
+            writer.writerow(row)
+
+            aggregated["frame_max_error"].append(frame_max_error)
+            aggregated["frame_max_std"].append(frame_max_std)
+            aggregated["f1_score"].append(f1)
+            aggregated["precision"].append(precision)
+            aggregated["recall"].append(recall)
+            aggregated["frame_mask_f1"].append(frame_mask_f1)
+            aggregated["frame_mask_precision"].append(frame_mask_precision)
+            aggregated["frame_mask_recall"].append(frame_mask_recall)
+            aggregated["onset_masked_error"].append(onset_masked_error)
+            aggregated["onset_masked_std"].append(onset_masked_std)
+
+            processed += 1
+            avg_frame_err = float(np.mean(aggregated["frame_max_error"]))
+            progress.set_postfix({"frame_err": f"{avg_frame_err:.2f}"}, refresh=False)
+
+    if not processed:
+        print("No test files processed.")
+        return
+
+    print("\n===== Dataset Score (velocity-picked) Averages =====")
+    for key, values in aggregated.items():
+        mean_value = float(np.mean(values))
+        print(f"{key}: {mean_value:.4f}")
 
 
-    elif cfg.exp.run_infer == "multi":
-        model_name = get_model_name(cfg)
-        ckpt_dir = os.path.join(cfg.exp.workspace, "checkpoints", model_name)
-        def _iteration_id(filename):
-            stem = filename.replace("_iterations.pth", "")
-            return int(stem) if stem.isdigit() else None
+def run_dataset_mode(cfg, args) -> None:
+    if cfg.exp.run_infer and cfg.exp.run_infer.lower() != "single":
+        tqdm.write("[warn] cfg.exp.run_infer != 'single'; forcing single-checkpoint inference.")
+    checkpoint_path = _resolve_checkpoint(cfg, args.checkpoint_path)
+    iteration_label = iteration_label_from_path(checkpoint_path, str(cfg.exp.ckpt_iteration))
 
-        ckpt_files = sorted(
-            [
-                f for f in os.listdir(ckpt_dir)
-                if f.endswith("_iterations.pth")
-            ],
-            key=lambda x: _iteration_id(x) or 0,
-        )
-        print(f"Found {len(ckpt_files)} checkpoints in {ckpt_dir}")
+    device = torch.device("cuda") if cfg.exp.cuda and torch.cuda.is_available() else torch.device("cpu")
+    print("=" * 80)
+    print("Inference Mode : DATASET (single checkpoint)")
+    print(f"Model Name     : {get_model_name(cfg)}")
+    print(f"Test Set       : {cfg.dataset.test_set}")
+    print(f"Using Device   : {device}")
+    print(
+        f"Feature Config : {cfg.feature.audio_feature} | sr={cfg.feature.sample_rate} "
+        f"| fps={cfg.feature.frames_per_second} | seg={cfg.feature.segment_seconds}s"
+    )
+    print(f"Checkpoint     : {checkpoint_path}")
+    print("=" * 80)
 
-        total_start = time.time()
-        for idx, ckpt_file in enumerate(ckpt_files):
-            ckpt_iteration = ckpt_file.replace("_iterations.pth", "")
-            cfg.exp.ckpt_iteration = ckpt_iteration
-            
-            tqdm.write("-" * 60)
-            tqdm.write(f"[{idx+1}/{len(ckpt_files)}] {ckpt_iteration}_iterations.pth")
+    t1 = time.time()
+    midi_dir = _export_dataset_midis(cfg, checkpoint_path, iteration_label, args.velocity_method)
+    print(f"\n[Done] Dataset inference finished in {time.time() - t1:.2f} sec")
+    print(f"[info] MIDI outputs saved to {midi_dir}")
 
-            t1 = time.time()
-            infer(cfg)
-            tqdm.write(f"[Done] Time: {time.time() - t1:.2f} sec")
 
-        print("\n" + "=" * 80)
-        print(f"All checkpoint inference completed in {time.time() - total_start:.2f} sec")
-        print("=" * 80)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Unified inference utilities.")
+    parser.add_argument(
+        "--mode",
+        choices=["single", "folder", "dataset", "dataset_score"],
+        default="dataset",
+        help=(
+            "single: run on one audio+MIDI pair; folder: iterate over a folder of pairs; "
+            "dataset: run dataset inference (single/multi per cfg); "
+            "dataset_score: run inference followed by Kim evaluation with note-picked velocities."
+        ),
+    )
+    parser.add_argument(
+        "--input-path",
+        default=None,
+        help="Audio/MIDI file path for single mode or folder for folder mode.",
+    )
+    parser.add_argument("--output-path", default=None, help="Output MIDI for single mode.")
+    parser.add_argument("--output-dir", default=None, help="Output directory for folder mode.")
+    parser.add_argument(
+        "--velocity-method",
+        default="max_frame",
+        choices=["max_frame", "onset_only"],
+        help="Strategy when converting velocity rolls to per-note values.",
+    )
+    parser.add_argument(
+        "--midi-format",
+        default="maestro",
+        choices=["maestro", "hpt", "smd", "maps"],
+        help="Layout hint for parsing MIDI files when reading standalone pairs.",
+    )
+    parser.add_argument(
+        "--checkpoint-path",
+        default=None,
+        help="Explicit checkpoint path. Otherwise resolved via config (and exp.ckpt_iteration).",
+    )
+    parser.add_argument("--config-path", default="./", help="Hydra config path.")
+    parser.add_argument("--config-name", default="config", help="Hydra config name.")
+    parser.add_argument(
+        "--overrides",
+        nargs="*",
+        default=[],
+        help="Optional Hydra overrides, e.g. exp.ckpt_iteration=100000 model.name=FiLMUNetPretrained",
+    )
+    args, remaining = parser.parse_known_args()
+    hydra_overrides = list(args.overrides) + remaining
 
-    else:
-        raise ValueError("cfg.exp.run_infer must be 'single' or 'multi'")
+    with initialize(config_path=args.config_path, job_name="infer", version_base=None):
+        cfg = compose(config_name=args.config_name, overrides=hydra_overrides)
+
+    mode_handlers = {
+        "dataset": run_dataset_mode,
+        "single": run_single_pair_mode,
+        "folder": run_folder_mode,
+        "dataset_score": run_dataset_score_mode,
+    }
+    handler = mode_handlers.get(args.mode)
+    if not handler:
+        raise ValueError(f"Unknown mode: {args.mode}")
+    handler(cfg, args)

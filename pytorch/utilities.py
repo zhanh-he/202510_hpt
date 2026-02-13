@@ -7,6 +7,7 @@ import csv
 import datetime
 import collections
 import pickle
+from pathlib import Path
 from mido import MidiFile
 
 from piano_vad import (note_detection_with_onset_offset_regress, 
@@ -68,6 +69,64 @@ def traverse_folder(folder):
             paths.append(filepath)
             
     return names, paths
+
+
+DEFAULT_AUDIO_EXTS = (".wav", ".mp3", ".flac", ".ogg", ".m4a")
+DEFAULT_MIDI_EXTS = (".mid", ".midi")
+
+
+def _match_with_suffix(base_path: Path, candidate_exts):
+    base = base_path.with_suffix("")
+    for ext in candidate_exts:
+        candidate = base.with_suffix(ext)
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        f"Could not locate any of {candidate_exts} matching base '{base.name}' near {base.parent}"
+    )
+
+
+def resolve_audio_midi_pair(path, audio_exts=DEFAULT_AUDIO_EXTS, midi_exts=DEFAULT_MIDI_EXTS):
+    """Return (audio_path, midi_path) for a file assumed to be part of a pair."""
+    candidate = Path(path)
+    suffix = candidate.suffix.lower()
+    if suffix in audio_exts:
+        audio_path = candidate
+        midi_path = _match_with_suffix(candidate, midi_exts)
+    elif suffix in midi_exts:
+        midi_path = candidate
+        audio_path = _match_with_suffix(candidate, audio_exts)
+    else:
+        raise ValueError(f"Unsupported file extension for '{candidate}'. Provide audio {audio_exts} or MIDI {midi_exts}.")
+    return audio_path, midi_path
+
+
+def collect_audio_midi_pairs(folder, audio_exts=DEFAULT_AUDIO_EXTS, midi_exts=DEFAULT_MIDI_EXTS):
+    """Return sorted list of (audio_path, midi_path) pairs under folder."""
+    folder = Path(folder)
+    if not folder.is_dir():
+        raise NotADirectoryError(f"{folder} is not a directory.")
+
+    pairs = []
+    for item in sorted(folder.iterdir()):
+        if not item.is_file() or item.suffix.lower() not in audio_exts:
+            continue
+        try:
+            midi_path = _match_with_suffix(item, midi_exts)
+        except FileNotFoundError:
+            continue
+        pairs.append((item, midi_path))
+
+    if not pairs:
+        raise FileNotFoundError(f"No audio/MIDI pairs found in {folder}")
+    return pairs
+
+
+def load_mono_audio(audio_path, sample_rate):
+    """Load mono audio with librosa."""
+    path = Path(audio_path)
+    audio, _ = librosa.load(str(path), sr=sample_rate, mono=True)
+    return audio.astype(np.float32)
 
 
 def note_to_freq(piano_note):
@@ -378,7 +437,7 @@ class TargetProcessor(object):
 
         # Set notes to ON until pedal is released
         if extend_pedal:
-            note_events = self.extend_pedal(note_events, pedal_events)
+            note_events = apply_pedal_extension(note_events, pedal_events)
         
         # Prepare targets
         frames_num = int(round(self.segment_seconds * self.frames_per_second)) + 1
@@ -432,8 +491,8 @@ class TargetProcessor(object):
 
         for k in range(self.classes_num):
             """Get regression targets"""
-            reg_onset_roll[:, k] = self.get_regression(reg_onset_roll[:, k])
-            reg_offset_roll[:, k] = self.get_regression(reg_offset_roll[:, k])
+            reg_onset_roll[:, k] = regression_curve(reg_onset_roll[:, k], self.frames_per_second)
+            reg_offset_roll[:, k] = regression_curve(reg_offset_roll[:, k], self.frames_per_second)
 
         # Process unpaired onsets to target
         for midi_note in buffer_dict.keys():
@@ -461,8 +520,8 @@ class TargetProcessor(object):
                         (pedal_event['onset_time'] - start_time) - (bgn_frame / self.frames_per_second)
 
         # Get regresssion padal targets
-        reg_pedal_onset_roll = self.get_regression(reg_pedal_onset_roll)
-        reg_pedal_offset_roll = self.get_regression(reg_pedal_offset_roll)
+        reg_pedal_onset_roll = regression_curve(reg_pedal_onset_roll, self.frames_per_second)
+        reg_pedal_offset_roll = regression_curve(reg_pedal_offset_roll, self.frames_per_second)
 
         target_dict = {
             'onset_roll': onset_roll, 'offset_roll': offset_roll,
@@ -475,65 +534,183 @@ class TargetProcessor(object):
 
         return target_dict, note_events, pedal_events
 
-    def extend_pedal(self, note_events, pedal_events):
-        """Update the offset of all notes until pedal is released.
 
-        Args:
-          note_events: list of dict, e.g., [
-            {'midi_note': 51, 'onset_time': 696.63544, 'offset_time': 696.9948, 'velocity': 44}, 
-            {'midi_note': 58, 'onset_time': 696.99585, 'offset_time': 697.18646, 'velocity': 50}
-            ...]
-          pedal_events: list of dict, e.g., [
-            {'onset_time': 696.46875, 'offset_time': 696.62604}, 
-            {'onset_time': 696.8063, 'offset_time': 698.50836}, 
-            ...]
+def prepare_aux_rolls(cfg, midi_events_time, midi_events, duration_sec):
+    processor = TargetProcessor(segment_seconds=duration_sec, cfg=cfg)
+    target_dict, note_events, pedal_events = processor.process(
+        start_time=0.0,
+        midi_events_time=midi_events_time,
+        midi_events=midi_events,
+        extend_pedal=True,
+    )
+    if "exframe_roll" not in target_dict:
+        target_dict["exframe_roll"] = target_dict["frame_roll"] * (1 - target_dict["onset_roll"])
+    return target_dict, note_events, pedal_events
 
-        Returns:
-          ex_note_events: list of dict, e.g., [
-            {'midi_note': 51, 'onset_time': 696.63544, 'offset_time': 696.9948, 'velocity': 44}, 
-            {'midi_note': 58, 'onset_time': 696.99585, 'offset_time': 697.18646, 'velocity': 50}
-            ...]
-        """
-        note_events = collections.deque(note_events)
-        pedal_events = collections.deque(pedal_events)
-        ex_note_events = []
 
-        idx = 0     # Index of note events
-        while pedal_events: # Go through all pedal events
-            pedal_event = pedal_events.popleft()
-            buffer_dict = {}    # keys: midi notes, value for each key: event index
+def original_score_events(cfg, midi_events_time, midi_events, duration_sec):
+    processor = TargetProcessor(segment_seconds=duration_sec, cfg=cfg)
+    _, note_events, pedal_events = processor.process(
+        start_time=0.0,
+        midi_events_time=midi_events_time,
+        midi_events=midi_events,
+        extend_pedal=False,
+    )
+    return note_events, pedal_events
 
-            while note_events:
-                note_event = note_events.popleft()
 
-                # If a note offset is between the onset and offset of a pedal, 
-                # Then set the note offset to when the pedal is released.
-                if pedal_event['onset_time'] < note_event['offset_time'] < pedal_event['offset_time']:
-                    
-                    midi_note = note_event['midi_note']
+def select_condition_roll(target_dict, condition_name):
+    if condition_name is None:
+        return None
+    name = str(condition_name).strip()
+    if not name or name.lower() in {"none", "null"}:
+        return None
+    key = f"{name}_roll"
+    if key not in target_dict:
+        raise KeyError(f"Condition '{name}' requested, but '{key}' not found in target_dict.")
+    return target_dict[key]
 
-                    if midi_note in buffer_dict.keys():
-                        """Multiple same note inside a pedal"""
-                        _idx = buffer_dict[midi_note]
-                        del buffer_dict[midi_note]
-                        ex_note_events[_idx]['offset_time'] = note_event['onset_time']
 
-                    # Set note offset to pedal offset
-                    note_event['offset_time'] = pedal_event['offset_time']
-                    buffer_dict[midi_note] = idx
-                
-                ex_note_events.append(note_event)
-                idx += 1
+def pick_velocity_from_roll(note_events, velocity_roll, cfg, strategy):
+    fps = cfg.feature.frames_per_second
+    begin_note = cfg.feature.begin_note
+    velocity_scale = cfg.feature.velocity_scale
+    num_frames, num_keys = velocity_roll.shape
 
-                # Break loop and pop next pedal
-                if note_event['offset_time'] > pedal_event['offset_time']:
-                    break
+    for event in note_events:
+        pitch_idx = event["midi_note"] - begin_note
+        if pitch_idx < 0 or pitch_idx >= num_keys:
+            continue
 
+        onset_frame = int(round(event["onset_time"] * fps))
+        offset_frame = int(round(event["offset_time"] * fps))
+        onset_frame = np.clip(onset_frame, 0, max(0, num_frames - 1))
+        offset_frame = max(onset_frame + 1, offset_frame)
+        offset_frame = min(offset_frame, num_frames)
+
+        note_curve = velocity_roll[onset_frame:offset_frame, pitch_idx]
+        if note_curve.size == 0:
+            picked = 0.0
+        elif strategy == "max_frame":
+            picked = float(np.max(note_curve))
+        elif strategy == "onset_only":
+            picked = float(note_curve[0])
+        else:
+            raise ValueError(f"Unknown velocity pick strategy: {strategy}")
+
+        scaled_velocity = np.clip(picked * velocity_scale, 0, velocity_scale - 1)
+        event["velocity"] = int(round(scaled_velocity))
+
+
+def check_duration_alignment(audio_len, midi_events_time):
+    midi_len = float(midi_events_time[-1]) if midi_events_time.size else 0.0
+    diff = abs(audio_len - midi_len)
+    if diff > 0.05:
+        print(
+            f"[warn] Audio duration ({audio_len:.2f}s) and MIDI duration ({midi_len:.2f}s) "
+            f"differ by {diff:.2f}s. Proceeding with audio duration as reference.",
+        )
+
+
+def iteration_label_from_path(path, fallback=None):
+    path = Path(path)
+    stem = path.stem
+    if stem.endswith("_iterations"):
+        stem = stem[: -len("_iterations")]
+    if stem:
+        return stem
+    if fallback:
+        return str(fallback)
+    return "custom"
+
+
+def apply_pedal_extension(note_events, pedal_events):
+    """Update the offset of all notes until pedal is released."""
+    note_events = collections.deque(note_events)
+    pedal_events = collections.deque(pedal_events)
+    ex_note_events = []
+
+    idx = 0
+    while pedal_events:
+        pedal_event = pedal_events.popleft()
+        buffer_dict = {}
         while note_events:
-            """Append left notes"""
-            ex_note_events.append(note_events.popleft())
+            note_event = note_events.popleft()
+            if pedal_event["onset_time"] < note_event["offset_time"] < pedal_event["offset_time"]:
+                midi_note = note_event["midi_note"]
+                if midi_note in buffer_dict:
+                    _idx = buffer_dict[midi_note]
+                    del buffer_dict[midi_note]
+                    ex_note_events[_idx]["offset_time"] = note_event["onset_time"]
+                note_event["offset_time"] = pedal_event["offset_time"]
+                buffer_dict[midi_note] = idx
 
-        return ex_note_events
+            ex_note_events.append(note_event)
+            idx += 1
+            if note_event["offset_time"] > pedal_event["offset_time"]:
+                break
+
+    while note_events:
+        ex_note_events.append(note_events.popleft())
+
+    return ex_note_events
+
+
+def regression_curve(input_vec, frames_per_second):
+    """Regression target used for onset/offset localization."""
+    step = 1.0 / frames_per_second
+    output = np.ones_like(input_vec)
+
+    locts = np.where(input_vec < 0.5)[0]
+    if locts.size:
+        for t in range(0, locts[0]):
+            output[t] = step * (t - locts[0]) - input_vec[locts[0]]
+
+        for i in range(0, len(locts) - 1):
+            mid = (locts[i] + locts[i + 1]) // 2
+            for t in range(locts[i], mid):
+                output[t] = step * (t - locts[i]) - input_vec[locts[i]]
+            for t in range(mid, locts[i + 1]):
+                output[t] = step * (t - locts[i + 1]) - input_vec[locts[i]]
+
+        for t in range(locts[-1], len(input_vec)):
+            output[t] = step * (t - locts[-1]) - input_vec[locts[-1]]
+
+    output = np.clip(np.abs(output), 0.0, 0.05) * 20
+    return 1.0 - output
+
+
+def note_events_to_velocity_roll(
+    note_events,
+    frames_num,
+    num_keys,
+    frames_per_second,
+    begin_note,
+    velocity_scale,
+):
+    """Render note events with integer velocities back to a frame/key grid."""
+    roll = np.zeros((frames_num, num_keys), dtype=np.float32)
+    scale = float(velocity_scale)
+
+    for event in note_events:
+        midi_note = event.get("midi_note")
+        if midi_note is None:
+            continue
+        pitch_idx = int(midi_note) - int(begin_note)
+        if pitch_idx < 0 or pitch_idx >= num_keys:
+            continue
+
+        onset = int(round(float(event.get("onset_time", 0.0)) * frames_per_second))
+        offset = int(round(float(event.get("offset_time", 0.0)) * frames_per_second))
+        onset = np.clip(onset, 0, max(0, frames_num - 1))
+        offset = max(onset + 1, offset)
+        offset = min(offset, frames_num)
+
+        value = float(event.get("velocity", 0)) / scale
+        if value <= 0:
+            continue
+        roll[onset:offset, pitch_idx] = value
+    return roll
 
     def get_regression(self, input):
         """Get regression target. See Fig. 2 of [1] for an example.

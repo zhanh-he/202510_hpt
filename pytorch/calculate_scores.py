@@ -1,7 +1,7 @@
 import csv
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import h5py
 import numpy as np
@@ -243,27 +243,47 @@ class KimStyleEvaluator:
         "onset_masked_std",
     ]
 
-    def __init__(self, cfg):
+    def __init__(
+        self,
+        cfg,
+        checkpoint_path: Optional[str] = None,
+        roll_adapter: Optional[
+            Callable[[Dict[str, np.ndarray], Dict[str, np.ndarray], Dict[str, Any]], np.ndarray]
+        ] = None,
+        results_subdir: str = "kim_eval",
+    ):
         if cfg.model.type != "velo":
             raise ValueError("Kim-style evaluation is defined for velocity models only.")
-        if not cfg.exp.ckpt_iteration:
-            raise ValueError("cfg.exp.ckpt_iteration must be set for evaluation.")
 
         self.cfg = cfg
         self.model_name = get_model_name(cfg)
-        self.ckpt_iteration = str(cfg.exp.ckpt_iteration)
-        checkpoint_path = Path(cfg.exp.workspace) / "checkpoints" / self.model_name / f"{self.ckpt_iteration}_iterations.pth"
-        if not checkpoint_path.exists():
-            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        self.roll_adapter = roll_adapter
 
-        self.transcriptor = VeloTranscription(str(checkpoint_path), cfg)
+        if checkpoint_path:
+            self.checkpoint_path = Path(checkpoint_path)
+            self.ckpt_iteration = self.checkpoint_path.stem.replace("_iterations", "")
+        else:
+            if not cfg.exp.ckpt_iteration:
+                raise ValueError("cfg.exp.ckpt_iteration must be set for evaluation.")
+            self.ckpt_iteration = str(cfg.exp.ckpt_iteration)
+            self.checkpoint_path = (
+                Path(cfg.exp.workspace)
+                / "checkpoints"
+                / self.model_name
+                / f"{self.ckpt_iteration}_iterations.pth"
+            )
+
+        if not self.checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {self.checkpoint_path}")
+
+        self.transcriptor = VeloTranscription(str(self.checkpoint_path), cfg)
 
         hdf5_dir = resolve_hdf5_dir(cfg.exp.workspace, cfg.dataset.test_set, cfg.feature.sample_rate)
         _, self.hdf5_paths = traverse_folder(hdf5_dir)
 
         self.results_dir = (
             Path(cfg.exp.workspace)
-            / "kim_eval"
+            / results_subdir
             / cfg.dataset.test_set
             / self.model_name
             / f"{self.ckpt_iteration}_iterations"
@@ -296,10 +316,21 @@ class KimStyleEvaluator:
         transcribed = self.transcriptor.transcribe(audio, input2, input3, midi_path=None)
         output_dict = transcribed["output_dict"]
 
-        align_len = min(output_dict["velocity_output"].shape[0], target_dict["velocity_roll"].shape[0])
+        predicted_roll = output_dict["velocity_output"]
+        if self.roll_adapter:
+            context = {
+                "audio": audio,
+                "midi_events": midi_events,
+                "midi_events_time": midi_events_time,
+                "duration": segment_seconds,
+                "cfg": self.cfg,
+            }
+            predicted_roll = self.roll_adapter(output_dict, target_dict, context)
+
+        align_len = min(predicted_roll.shape[0], target_dict["velocity_roll"].shape[0])
 
         output_entry = {
-            "velocity_output": output_dict["velocity_output"][:align_len],
+            "velocity_output": predicted_roll[:align_len],
         }
         target_entry = {
             "velocity_roll": target_dict["velocity_roll"][:align_len],
@@ -378,6 +409,23 @@ class KimStyleEvaluator:
         return aggregated
 
 
+def run_kim_evaluation(
+    cfg,
+    checkpoint_path: Optional[str] = None,
+    roll_adapter: Optional[
+        Callable[[Dict[str, np.ndarray], Dict[str, np.ndarray], Dict[str, Any]], np.ndarray]
+    ] = None,
+    results_subdir: str = "kim_eval",
+) -> Dict[str, List[float]]:
+    evaluator = KimStyleEvaluator(
+        cfg,
+        checkpoint_path=checkpoint_path,
+        roll_adapter=roll_adapter,
+        results_subdir=results_subdir,
+    )
+    return evaluator.run()
+
+
 def main() -> None:
     initialize(config_path="./", job_name="kim_eval", version_base=None)
     cfg = compose(config_name="config", overrides=sys.argv[1:])
@@ -388,8 +436,7 @@ def main() -> None:
     print(f"Test Set        : {cfg.dataset.test_set}")
     print("=" * 80)
 
-    evaluator = KimStyleEvaluator(cfg)
-    stats_dict = evaluator.run()
+    stats_dict = run_kim_evaluation(cfg)
 
     if not stats_dict:
         print("No test files processed.")

@@ -260,6 +260,7 @@ def train(cfg):
     iteration = start_iteration
     train_bgn_time = time.time()
     train_loss = 0.0
+    train_loss_steps = 0
 
     early_phase = 0    # disable early evaluation
     # early_phase = int(cfg.exp.total_iteration * 0.05)  # 5% of total iterations, e.g. 10k of 200k
@@ -278,6 +279,7 @@ def train(cfg):
         batch_output_dict, loss = forward_pass(cfg, model, batch_data_dict, device)
         print(iteration, loss)
         train_loss += loss.item()
+        train_loss_steps += 1
         log_velocity_rolls(cfg, iteration, batch_output_dict, batch_data_dict)
         loss.backward()
         optimizer.step()
@@ -290,7 +292,9 @@ def train(cfg):
             logging.info('------------------------------------')
             logging.info(f"Iteration: {iteration}/{cfg.exp.total_iteration}")
             train_fin_time = time.time()
-            train_loss /= cfg.exp.eval_iteration
+            avg_train_loss = None
+            if train_loss_steps > 0 and iteration != 0:
+                avg_train_loss = train_loss / train_loss_steps
             raw_train_statistics = evaluator.evaluate(eval_train_loader)
             raw_maestro_statistics = evaluator.evaluate(eval_maestro_loader)
             raw_smd_statistics = evaluator.evaluate(eval_smd_loader)
@@ -301,19 +305,22 @@ def train(cfg):
             valid_smd_statistics = _select_velocity_metrics(raw_smd_statistics)
             valid_maps_statistics = _select_velocity_metrics(raw_maps_statistics)
 
-            logging.info(f"    Train Loss: {train_loss:.4f}")
+            if avg_train_loss is not None:
+                logging.info(f"    Train Loss: {avg_train_loss:.4f}")
             logging.info(f"    Train Stat: {train_statistics}")
             logging.info(f"    Valid Maestro Stat: {valid_maestro_statistics}")
             logging.info(f"    Valid SMD Stat: {valid_smd_statistics}")
             logging.info(f"    Valid MAPS Stat: {valid_maps_statistics}")
-            wandb.log({
+            log_payload = {
                 "iteration": iteration,
-                "train_loss": train_loss,
                 "train_stat": train_statistics,
                 "valid_maestro_stat": valid_maestro_statistics,
                 "valid_smd_stat": valid_smd_statistics,
                 "valid_maps_stat": valid_maps_statistics,
-            })
+            }
+            if avg_train_loss is not None:
+                log_payload["train_loss"] = avg_train_loss
+            wandb.log(log_payload)
 
             train_time = train_fin_time - train_bgn_time
             validate_time = time.time() - train_fin_time
@@ -322,6 +329,7 @@ def train(cfg):
                 ''.format(train_time, validate_time))
             
             train_loss = 0.0
+            train_loss_steps = 0
             train_bgn_time = time.time()
 
             # Save model
