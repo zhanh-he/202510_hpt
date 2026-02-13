@@ -17,6 +17,7 @@ from pytorch_utils import forward, forward_velo
 from model_DynEst import DynestAudioCNN
 from model_FilmUnet import FiLMUNetPretrained
 from model_HPT import Dual_Velocity_HPT, Single_Velocity_HPT, Triple_Velocity_HPT
+from feature_extractor import PsychoFeatureExtractor
 from utilities import (
     OnsetsFramesPostProcessor,
     RegressionPostProcessor,
@@ -41,7 +42,7 @@ from utilities import (
     write_events_to_midi,
 )
 
-KIM_CSV_FIELDS = [
+VELO_SCORE_FIELDS = [
     "test_h5",
     "frame_max_error",
     "frame_max_std",
@@ -53,6 +54,13 @@ KIM_CSV_FIELDS = [
     "frame_mask_recall",
     "onset_masked_error",
     "onset_masked_std",
+] 
+
+AUDIO_SCORE_FIELDS = [
+    "test_h5",
+    "bark_band_cosine",
+    "bark_overall_cosine",
+    "ntot_cosine",
 ]
 
 
@@ -284,6 +292,8 @@ def _predict_velocity_from_alignment(
     velocity_roll = transcribed["output_dict"]["velocity_output"]
 
     note_events, pedal_events = original_score_events(cfg, midi_events_time, midi_events, duration)
+    gt_note_events = [dict(event) for event in note_events]
+    gt_pedal_events = [dict(event) for event in pedal_events]
     pick_velocity_from_roll(note_events, velocity_roll, cfg, strategy=velocity_method)
 
     pred_roll = note_events_to_velocity_roll(
@@ -294,7 +304,7 @@ def _predict_velocity_from_alignment(
         begin_note=cfg.feature.begin_note,
         velocity_scale=cfg.feature.velocity_scale,
     )
-    return note_events, pedal_events, target_dict, pred_roll
+    return note_events, pedal_events, target_dict, pred_roll, gt_note_events, gt_pedal_events
 
 
 def _transcribe_pair_to_midi(
@@ -314,7 +324,7 @@ def _transcribe_pair_to_midi(
         for msg in midi_dict["midi_event"]
     ]
 
-    note_events, pedal_events, _, _ = _predict_velocity_from_alignment(
+    note_events, pedal_events, _, _, _, _ = _predict_velocity_from_alignment(
         cfg,
         transcriber,
         audio,
@@ -335,6 +345,7 @@ def _process_dataset_file(
     hdf5_path: str,
     velocity_method: str,
     midi_dir: Optional[Path] = None,
+    gt_midi_dir: Optional[Path] = None,
 ):
     with h5py.File(hdf5_path, "r") as hf:
         if hf.attrs["split"].decode() != "test":
@@ -344,7 +355,14 @@ def _process_dataset_file(
         midi_events_time = hf["midi_event_time"][:]
 
     duration = len(audio) / cfg.feature.sample_rate
-    note_events, pedal_events, target_dict, pred_roll = _predict_velocity_from_alignment(
+    (
+        note_events,
+        pedal_events,
+        target_dict,
+        pred_roll,
+        gt_note_events,
+        gt_pedal_events,
+    ) = _predict_velocity_from_alignment(
         cfg,
         transcriber,
         audio,
@@ -354,10 +372,18 @@ def _process_dataset_file(
         velocity_method,
     )
 
+    stem = Path(hdf5_path).stem
+    pred_midi_path = None
+    gt_midi_path = None
     if midi_dir:
-        output_path = midi_dir / f"{Path(hdf5_path).stem}.mid"
-        create_folder(str(output_path.parent))
-        write_events_to_midi(0.0, note_events, pedal_events, str(output_path))
+        pred_midi_path = midi_dir / f"{stem}_pred.mid"
+        create_folder(str(pred_midi_path.parent))
+        write_events_to_midi(0.0, note_events, pedal_events, str(pred_midi_path))
+
+    if gt_midi_dir:
+        gt_midi_path = gt_midi_dir / f"{stem}_gt.mid"
+        create_folder(str(gt_midi_path.parent))
+        write_events_to_midi(0.0, gt_note_events, gt_pedal_events, str(gt_midi_path))
 
     align_len = min(pred_roll.shape[0], target_dict["velocity_roll"].shape[0])
     output_entry = {
@@ -369,7 +395,7 @@ def _process_dataset_file(
         "onset_roll": target_dict["onset_roll"][:align_len],
         "pedal_frame_roll": target_dict["pedal_frame_roll"][:align_len],
     }
-    return Path(hdf5_path).name, output_entry, target_entry
+    return Path(hdf5_path).name, output_entry, target_entry, pred_midi_path, gt_midi_path
 
 
 def _export_dataset_midis(cfg, checkpoint_path: Path, iteration_label: str, velocity_method: str) -> Path:
@@ -390,6 +416,91 @@ def _export_dataset_midis(cfg, checkpoint_path: Path, iteration_label: str, velo
     for hdf5_path in progress:
         _process_dataset_file(cfg, transcriber, hdf5_path, velocity_method, midi_dir=output_dir)
     return output_dir
+
+
+def _render_midi_to_audio(midi_path: Path, soundfont_path: str, sample_rate: int) -> np.ndarray:
+    try:
+        import fluidsynth
+    except ImportError as exc:
+        raise ImportError(
+            "pyfluidsynth is required for audio-based evaluation. Install it with `pip install pyfluidsynth`."
+        ) from exc
+
+    fs = fluidsynth.Synth(samplerate=sample_rate)
+    fs.start()
+    sfid = fs.sfload(soundfont_path)
+    fs.program_select(0, sfid, 0, 0)
+
+    player = fluidsynth.Player(fs)
+    player.add(str(midi_path))
+    player.play()
+
+    audio = []
+    block = 2048
+    while player.get_status() == fluidsynth.FLUID_PLAYER_PLAYING:
+        samples = fs.get_samples(block)
+        audio.extend(samples)
+    fs.delete()
+
+    audio = np.asarray(audio, dtype=np.float32)
+    if audio.size == 0:
+        return np.zeros(1, dtype=np.float32)
+    audio = audio.reshape(-1, 2).mean(axis=1)
+    audio = audio / (np.max(np.abs(audio)) + 1e-9)
+    return audio
+
+
+def _cosine_similarity(vec1: np.ndarray, vec2: np.ndarray) -> float:
+    vec1 = vec1.reshape(-1)
+    vec2 = vec2.reshape(-1)
+    denom = (np.linalg.norm(vec1) * np.linalg.norm(vec2)) + 1e-9
+    if denom == 0:
+        return 0.0
+    return float(np.dot(vec1, vec2) / denom)
+
+
+def _compute_audio_metrics(
+    pred_midi: Path,
+    gt_midi: Path,
+    soundfont_path: str,
+    sample_rate: int,
+    frames_per_second: int,
+    fft_size: int,
+    bark_extractor: PsychoFeatureExtractor,
+    ntot_extractor: PsychoFeatureExtractor,
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    if not pred_midi or not gt_midi:
+        return None, None, None
+
+    pred_audio = _render_midi_to_audio(pred_midi, soundfont_path, sample_rate)
+    gt_audio = _render_midi_to_audio(gt_midi, soundfont_path, sample_rate)
+    min_len = min(pred_audio.size, gt_audio.size)
+    if min_len == 0:
+        return None, None, None
+    pred_audio = pred_audio[:min_len]
+    gt_audio = gt_audio[:min_len]
+
+    with torch.no_grad():
+        pred_tensor = torch.from_numpy(pred_audio).unsqueeze(0)
+        gt_tensor = torch.from_numpy(gt_audio).unsqueeze(0)
+        pred_bark = bark_extractor(pred_tensor).squeeze(0).cpu().numpy()
+        gt_bark = bark_extractor(gt_tensor).squeeze(0).cpu().numpy()
+        bands = min(pred_bark.shape[0], gt_bark.shape[0])
+        pred_bark = pred_bark[:bands]
+        gt_bark = gt_bark[:bands]
+
+        band_cos = []
+        for band in range(bands):
+            band_cos.append(_cosine_similarity(pred_bark[band], gt_bark[band]))
+        bark_band_cosine = float(np.mean(band_cos)) if band_cos else None
+        bark_overall_cosine = _cosine_similarity(pred_bark, gt_bark)
+
+        pred_ntot = ntot_extractor(pred_tensor).squeeze(0).cpu().numpy()
+        gt_ntot = ntot_extractor(gt_tensor).squeeze(0).cpu().numpy()
+        length = min(pred_ntot.size, gt_ntot.size)
+        ntot_cosine = _cosine_similarity(pred_ntot[:length], gt_ntot[:length])
+
+    return bark_band_cosine, bark_overall_cosine, ntot_cosine
 
 
 def run_single_pair_mode(cfg, args) -> None:
@@ -438,7 +549,7 @@ def run_folder_mode(cfg, args) -> None:
         print(f"[folder] {audio_path.name} -> {out_path.name} ({note_count} notes)")
 
 
-def run_dataset_score_mode(cfg, args) -> None:
+def run_dataset_velo_score_mode(cfg, args) -> None:
     from calculate_scores import eval_from_list, gt_to_note_list
 
     checkpoint_path = _resolve_checkpoint(cfg, args.checkpoint_path)
@@ -447,7 +558,7 @@ def run_dataset_score_mode(cfg, args) -> None:
 
     results_dir = (
         Path(cfg.exp.workspace)
-        / "dataset_score"
+        / "dataset_velo_score"
         / cfg.dataset.test_set
         / get_model_name(cfg)
         / f"{iteration_label}_iterations"
@@ -457,13 +568,13 @@ def run_dataset_score_mode(cfg, args) -> None:
     create_folder(str(midi_dir))
     create_folder(str(error_dir))
 
-    csv_path = results_dir / f"{cfg.dataset.test_set}_dataset_score.csv"
+    csv_path = results_dir / f"{cfg.dataset.test_set}_dataset_velo_score.csv"
     hdf5s_dir = resolve_hdf5_dir(cfg.exp.workspace, cfg.dataset.test_set, cfg.feature.sample_rate)
     _, hdf5_paths = traverse_folder(hdf5s_dir)
 
     device = torch.device("cuda") if cfg.exp.cuda and torch.cuda.is_available() else torch.device("cpu")
     print("=" * 80)
-    print("Inference Mode : DATASET_SCORE (single checkpoint)")
+    print("Inference Mode : DATASET_VELO_SCORE (single checkpoint)")
     print(f"Model Name     : {get_model_name(cfg)}")
     print(f"Test Set       : {cfg.dataset.test_set}")
     print(f"Using Device   : {device}")
@@ -476,14 +587,14 @@ def run_dataset_score_mode(cfg, args) -> None:
     print(f"Results Dir    : {results_dir}")
     print("=" * 80)
 
-    aggregated = {field: [] for field in KIM_CSV_FIELDS if field != "test_h5"}
+    aggregated = {field: [] for field in VELO_SCORE_FIELDS if field != "test_h5"}
     processed = 0
 
     with open(csv_path, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
-        writer.writerow(KIM_CSV_FIELDS)
+        writer.writerow(VELO_SCORE_FIELDS)
 
-        progress = tqdm(sorted(hdf5_paths), desc="Dataset Score", unit="file", ncols=80)
+        progress = tqdm(sorted(hdf5_paths), desc="Dataset Velo Score", unit="file", ncols=80)
         for hdf5_path in progress:
             result = _process_dataset_file(
                 cfg,
@@ -495,7 +606,7 @@ def run_dataset_score_mode(cfg, args) -> None:
             if not result:
                 continue
 
-            audio_name, output_entry, target_entry = result
+            audio_name, output_entry, target_entry, _, _ = result
             output_list = [output_entry]
             target_list = [target_entry]
 
@@ -549,8 +660,122 @@ def run_dataset_score_mode(cfg, args) -> None:
         print("No test files processed.")
         return
 
-    print("\n===== Dataset Score (velocity-picked) Averages =====")
+    print("\n===== Dataset Velocity Score Averages =====")
     for key, values in aggregated.items():
+        mean_value = float(np.mean(values))
+        print(f"{key}: {mean_value:.4f}")
+
+
+def run_dataset_audio_score_mode(cfg, args) -> None:
+    if not args.soundfont_path:
+        raise ValueError("dataset_audio_score mode requires --soundfont-path for rendering.")
+
+    checkpoint_path = _resolve_checkpoint(cfg, args.checkpoint_path)
+    iteration_label = iteration_label_from_path(checkpoint_path, str(cfg.exp.ckpt_iteration))
+    transcriber = VeloTranscription(checkpoint_path=str(checkpoint_path), cfg=cfg)
+
+    results_dir = (
+        Path(cfg.exp.workspace)
+        / "dataset_audio_score"
+        / cfg.dataset.test_set
+        / get_model_name(cfg)
+        / f"{iteration_label}_iterations"
+    )
+    pred_midi_dir = results_dir / "midis"
+    gt_midi_dir = results_dir / "gt_midis"
+    create_folder(str(pred_midi_dir))
+    create_folder(str(gt_midi_dir))
+
+    csv_path = results_dir / f"{cfg.dataset.test_set}_dataset_audio_score.csv"
+    hdf5s_dir = resolve_hdf5_dir(cfg.exp.workspace, cfg.dataset.test_set, cfg.feature.sample_rate)
+    _, hdf5_paths = traverse_folder(hdf5s_dir)
+
+    device = torch.device("cuda") if cfg.exp.cuda and torch.cuda.is_available() else torch.device("cpu")
+    print("=" * 80)
+    print("Inference Mode : DATASET_AUDIO_SCORE (single checkpoint)")
+    print(f"Model Name     : {get_model_name(cfg)}")
+    print(f"Test Set       : {cfg.dataset.test_set}")
+    print(f"Using Device   : {device}")
+    print(
+        f"Feature Config : {cfg.feature.audio_feature} | sr={cfg.feature.sample_rate} "
+        f"| fps={cfg.feature.frames_per_second} | seg={cfg.feature.segment_seconds}s"
+    )
+    print(f"Checkpoint     : {checkpoint_path}")
+    print(f"MIDI Output    : {pred_midi_dir}")
+    print(f"Results Dir    : {results_dir}")
+    print("=" * 80)
+
+    aggregated = {field: [] for field in AUDIO_SCORE_FIELDS if field != "test_h5"}
+    processed = 0
+
+    bark_extractor = PsychoFeatureExtractor(
+        sample_rate=args.audio_eval_sample_rate,
+        fft_size=args.audio_eval_fft_size,
+        frames_per_second=args.audio_eval_frames_per_second,
+        return_mode="sone",
+    ).to("cpu")
+    ntot_extractor = PsychoFeatureExtractor(
+        sample_rate=args.audio_eval_sample_rate,
+        fft_size=args.audio_eval_fft_size,
+        frames_per_second=args.audio_eval_frames_per_second,
+        return_mode="ntot",
+    ).to("cpu")
+
+    with open(csv_path, "w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(AUDIO_SCORE_FIELDS)
+
+        progress = tqdm(sorted(hdf5_paths), desc="Dataset Audio Score", unit="file", ncols=80)
+        for hdf5_path in progress:
+            result = _process_dataset_file(
+                cfg,
+                transcriber,
+                hdf5_path,
+                args.velocity_method,
+                midi_dir=pred_midi_dir,
+                gt_midi_dir=gt_midi_dir,
+            )
+            if not result:
+                continue
+            audio_name, _, _, pred_midi_path, gt_midi_path = result
+
+            bark_band_cos, bark_overall_cos, ntot_cos = _compute_audio_metrics(
+                pred_midi_path,
+                gt_midi_path,
+                args.soundfont_path,
+                args.audio_eval_sample_rate,
+                args.audio_eval_frames_per_second,
+                args.audio_eval_fft_size,
+                bark_extractor,
+                ntot_extractor,
+            )
+
+            row = [
+                audio_name,
+                bark_band_cos,
+                bark_overall_cos,
+                ntot_cos,
+            ]
+            writer.writerow(row)
+
+            if bark_band_cos is not None:
+                aggregated["bark_band_cosine"].append(bark_band_cos)
+            if bark_overall_cos is not None:
+                aggregated["bark_overall_cosine"].append(bark_overall_cos)
+            if ntot_cos is not None:
+                aggregated["ntot_cosine"].append(ntot_cos)
+
+            processed += 1
+
+    if not processed:
+        print("No test files processed.")
+        return
+
+    print("\n===== Dataset Audio Score Averages =====")
+    for key, values in aggregated.items():
+        if not values:
+            print(f"{key}: n/a")
+            continue
         mean_value = float(np.mean(values))
         print(f"{key}: {mean_value:.4f}")
 
@@ -584,12 +809,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Unified inference utilities.")
     parser.add_argument(
         "--mode",
-        choices=["single", "folder", "dataset", "dataset_score"],
+        choices=["single", "folder", "dataset", "dataset_velo_score", "dataset_audio_score"],
         default="dataset",
         help=(
             "single: run on one audio+MIDI pair; folder: iterate over a folder of pairs; "
-            "dataset: run dataset inference (single/multi per cfg); "
-            "dataset_score: run inference followed by Kim evaluation with note-picked velocities."
+            "dataset: run dataset inference (single checkpoint); "
+            "dataset_velo_score: run inference + Kim-style score; "
+            "dataset_audio_score: render audio and compute Bark loudness similarity."
         ),
     )
     parser.add_argument(
@@ -624,6 +850,29 @@ if __name__ == "__main__":
         default=[],
         help="Optional Hydra overrides, e.g. exp.ckpt_iteration=100000 model.name=FiLMUNetPretrained",
     )
+    parser.add_argument(
+        "--soundfont-path",
+        default=None,
+        help="Path to an SF2 soundfont used for audio rendering (required for dataset_score).",
+    )
+    parser.add_argument(
+        "--audio-eval-sample-rate",
+        type=int,
+        default=44100,
+        help="Sample rate used when rendering MIDI for audio evaluation.",
+    )
+    parser.add_argument(
+        "--audio-eval-frames-per-second",
+        type=int,
+        default=86,
+        help="Frames per second for Bark loudness evaluation.",
+    )
+    parser.add_argument(
+        "--audio-eval-fft-size",
+        type=int,
+        default=1024,
+        help="FFT size for Bark loudness evaluation.",
+    )
     args, remaining = parser.parse_known_args()
     hydra_overrides = list(args.overrides) + remaining
 
@@ -632,9 +881,10 @@ if __name__ == "__main__":
 
     mode_handlers = {
         "dataset": run_dataset_mode,
+        "dataset_velo_score": run_dataset_score_mode,
+        "dataset_audio_score": run_dataset_audio_score_mode,
         "single": run_single_pair_mode,
         "folder": run_folder_mode,
-        "dataset_score": run_dataset_score_mode,
     }
     handler = mode_handlers.get(args.mode)
     if not handler:
