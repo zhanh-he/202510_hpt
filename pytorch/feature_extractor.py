@@ -59,9 +59,10 @@ from nnAudio.Spectrogram import CQT as NNAudioCQT
 import numpy as np
 import pandas as pd
 import os, time, argparse, h5py
-from typing import Literal
+from typing import Literal, Optional
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
+
 
 # Utility function for feature extractor and freq_bins selection
 def get_feature_extractor_and_bins(audio_feature, sample_rate, fft_size, frames_per_second):
@@ -84,13 +85,18 @@ def get_feature_extractor_and_bins(audio_feature, sample_rate, fft_size, frames_
         feature_extractor = CQTFeatureExtractor(
             sample_rate=sample_rate,
             frames_per_second=frames_per_second,
-            fallback_fft_size=fft_size,
+            fallback_fft_size=fft_size, # DEFAULT_CQT_FALLBACK_FFT_SIZE=2048
         )
         freq_bins = feature_extractor.freq_bins
     else:
         raise ValueError(f"Invalid audio_feature: {audio_feature}")
     return feature_extractor, freq_bins
 
+
+DEFAULT_CQT_BINS_PER_SEMITONE = 4
+DEFAULT_CQT_TOP_DB = 80.0
+DEFAULT_CQT_N_PITCHES = 88
+DEFAULT_CQT_FALLBACK_FFT_SIZE = 2048
 
 class CQTFeatureExtractor(nn.Module):
     """Constant-Q transform front-end compatible with HPPNet."""
@@ -99,10 +105,10 @@ class CQTFeatureExtractor(nn.Module):
         self,
         sample_rate: int,
         frames_per_second: int,
-        bins_per_semitone: int = 4,
-        n_pitches: int = 88,
-        top_db: float = 80.0,
-        fallback_fft_size: int = 2048,
+        bins_per_semitone: int = DEFAULT_CQT_BINS_PER_SEMITONE,
+        n_pitches: int = DEFAULT_CQT_N_PITCHES,
+        top_db: float = DEFAULT_CQT_TOP_DB,
+        fallback_fft_size: int = DEFAULT_CQT_FALLBACK_FFT_SIZE,
     ) -> None:
         super().__init__()
         if bins_per_semitone <= 0:

@@ -6,6 +6,7 @@ import h5py
 import csv
 import librosa
 import logging
+from tqdm import tqdm
 
 from hydra import compose, initialize
 
@@ -279,8 +280,7 @@ def pack_maestro_dataset_to_hdf5(cfg):
     logging.info(f"Total audios number: {audios_num}")
 
     feature_time = time.time()
-    for n in range(audios_num):
-        logging.info(f"{n}: {meta_dict['midi_filename'][n]}")
+    for n in tqdm(range(audios_num), desc="MAESTRO", unit="track"):
 
         midi_path = os.path.join(dataset_dir, meta_dict["midi_filename"][n])
         midi_dict = read_midi(midi_path, "maestro")
@@ -353,8 +353,7 @@ def pack_maps_dataset_to_hdf5(cfg):
             if os.path.splitext(name)[-1] == ".mid"
         ]
 
-        for audio_name in audio_names:
-            print(f"{count}: {audio_name}")
+        for audio_name in tqdm(audio_names, desc=f"MAPS {piano}", unit="track"):
             audio_path = f"{os.path.join(sub_dir, audio_name)}.wav"
             midi_path = f"{os.path.join(sub_dir, audio_name)}.mid"
 
@@ -409,11 +408,10 @@ def pack_smd_dataset_to_hdf5(cfg):
     audio_midi_pairs = {name: ext for name, ext in audio_midi_pairs}
 
     excluded = {"Beethoven_WoO080_001_20081107-SMD"}
-    for audio_name, ext in audio_midi_pairs.items():
+    for audio_name, ext in tqdm(audio_midi_pairs.items(), desc="SMD", unit="track"):
         if audio_name in excluded:
             logging.info(f"Skipping excluded SMD track: {audio_name}")
             continue
-        print(f"{count}: {audio_name}")
         audio_path = os.path.join(dataset_dir, f"{audio_name}.mp3")
         midi_path = os.path.join(dataset_dir, f"{audio_name}.mid")
 

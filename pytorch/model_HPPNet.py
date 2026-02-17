@@ -4,11 +4,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from feature_extractor import CQTFeatureExtractor, get_feature_extractor_and_bins
+from feature_extractor import get_feature_extractor_and_bins
 
 DEFAULT_MODEL_SIZE = 128
-DEFAULT_CQT_BINS_PER_SEMITONE = 4
-DEFAULT_CQT_TOP_DB = 80.0
 
 
 class BiLSTM(nn.Module):
@@ -183,22 +181,13 @@ class HPPNet_SP(nn.Module):
         sample_rate = cfg.feature.sample_rate
         frames_per_second = cfg.feature.frames_per_second
         feature_type = getattr(cfg.feature, "audio_feature", "cqt")
-        if feature_type == "cqt":
-            self.frontend = CQTFeatureExtractor(
-                sample_rate=sample_rate,
-                frames_per_second=frames_per_second,
-                bins_per_semitone=DEFAULT_CQT_BINS_PER_SEMITONE,
-                n_pitches=88,
-                top_db=DEFAULT_CQT_TOP_DB,
-            )
-        else:
-            fft_size = cfg.feature.fft_size
-            self.frontend, _ = get_feature_extractor_and_bins(
-                feature_type,
-                sample_rate,
-                fft_size,
-                frames_per_second,
-            )
+        fft_size = cfg.feature.fft_size
+        self.frontend, _ = get_feature_extractor_and_bins(
+            feature_type,
+            sample_rate,
+            fft_size,
+            frames_per_second,
+        )
 
         model_size = int(getattr(cfg.model, "hppnet_model_size", DEFAULT_MODEL_SIZE))
         self.velocity_subnet = SubNet(model_size, head_names=("velocity",))
@@ -217,6 +206,3 @@ class HPPNet_SP(nn.Module):
                 align_corners=False,
             ).squeeze(1)
         return {"velocity_output": velocity}
-
-
-__all__ = ["HPPNet_SP"]
