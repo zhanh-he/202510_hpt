@@ -1,6 +1,6 @@
 wandb:
   project: "202602_hpt"
-  name: "${feature.audio_feature}-${model.name}-ext${model.input2}${model.input3}-sr${feature.sample_rate}-${wandb.comment}" # -iter${exp.total_iteration}
+  name: "${feature.audio_feature}-${model.name}-${loss.loss_type}-k${loss.kim_loss_alpha}-l1${loss.w_l1}-b${loss.w_bce}-d${loss.w_delta}-uh${loss.use_huber}-wh${loss.w_huber}-hd${loss.huber_delta}-ext${model.input2}${model.input3}-sr${feature.sample_rate}-${wandb.comment}" # -iter${exp.total_iteration}
   comment: "mel128"
 
 exp:
@@ -18,8 +18,6 @@ exp:
   weight_decay: 0.0
   decay: True # False
   reduce_iteration: 10_000 # 6_000
-  loss_type: "velocity_bce"
-  kim_loss_alpha: 0.5  # Weight of BCE term in Kim et al. 2024 BCE+L1 loss
   random_seed: 86
 
   mini_data: False # True when developing model
@@ -92,3 +90,13 @@ post:
   onset_threshold: 0.3
   offset_threshold: 0.3
   pedal_offset_threshold: 0.2
+
+loss:
+  loss_type: "velocity_bce"
+  kim_loss_alpha: 0.5
+  w_l1: 1.0
+  w_bce: 0.5
+  w_delta: 0.01
+  use_huber: true
+  w_huber: 1.0
+  huber_delta: 0.1

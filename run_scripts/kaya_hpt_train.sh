@@ -51,25 +51,25 @@ ln -s $DATA_SRC $DATA_VIEW
 
 declare -a EXPERIMENTS=(
 "python pytorch/train_iter.py feature.audio_feature='logmel' model.name='Single_Velocity_HPT'"
-"python pytorch/train_iter.py feature.audio_feature='logmel' model.name='Single_Velocity_HPT' exp.loss_type='kim_bce_l1' wandb.comment='kimloss'"
+"python pytorch/train_iter.py feature.audio_feature='logmel' model.name='Single_Velocity_HPT' loss.loss_type='kim_bce_l1' wandb.comment='kimloss'"
 
 "python pytorch/train_iter.py feature.audio_feature='logmel' model.name='Dual_Velocity_HPT' model.input2='frame'"
-"python pytorch/train_iter.py feature.audio_feature='logmel' model.name='Dual_Velocity_HPT' model.input2='frame' exp.loss_type='kim_bce_l1' wandb.comment='kimloss'"
+"python pytorch/train_iter.py feature.audio_feature='logmel' model.name='Dual_Velocity_HPT' model.input2='frame' loss.loss_type='kim_bce_l1' wandb.comment='kimloss'"
 
 "python pytorch/train_iter.py feature.audio_feature='logmel' model.name='DynestAudioCNN'"
-"python pytorch/train_iter.py feature.audio_feature='logmel' model.name='DynestAudioCNN' exp.loss_type='kim_bce_l1' wandb.comment='kimloss'"
+"python pytorch/train_iter.py feature.audio_feature='logmel' model.name='DynestAudioCNN' loss.loss_type='kim_bce_l1' wandb.comment='kimloss'"
 
 "python pytorch/train_iter.py feature.audio_feature='logmel' model.name='HPPNet_SP'"
-"python pytorch/train_iter.py feature.audio_feature='logmel' model.name='HPPNet_SP' exp.loss_type='kim_bce_l1' wandb.comment='kimloss'"
+"python pytorch/train_iter.py feature.audio_feature='logmel' model.name='HPPNet_SP' loss.loss_type='kim_bce_l1' wandb.comment='kimloss'"
 
 "python pytorch/train_iter.py model.name='HPPNet_SP' feature.audio_feature='cqt' feature.sample_rate=16000 feature.frames_per_second=50 feature.hop_seconds=1.0 feature.segment_seconds=20 exp.batch_size=3"
-"python pytorch/train_iter.py model.name='HPPNet_SP' feature.audio_feature='cqt' feature.sample_rate=16000 feature.frames_per_second=50 feature.hop_seconds=1.0 feature.segment_seconds=20 exp.batch_size=3 exp.loss_type='kim_bce_l1' wandb.comment='kimloss'"
+"python pytorch/train_iter.py model.name='HPPNet_SP' feature.audio_feature='cqt' feature.sample_rate=16000 feature.frames_per_second=50 feature.hop_seconds=1.0 feature.segment_seconds=20 exp.batch_size=3 loss.loss_type='kim_bce_l1' wandb.comment='kimloss'"
 
 "python pytorch/train_iter.py feature.audio_feature='logmel' model.name='Dual_Velocity_HPT' model.input2='onset'"
-"python pytorch/train_iter.py feature.audio_feature='logmel' model.name='Dual_Velocity_HPT' model.input2='onset' exp.loss_type='kim_bce_l1' wandb.comment='kimloss'"
+"python pytorch/train_iter.py feature.audio_feature='logmel' model.name='Dual_Velocity_HPT' model.input2='onset' loss.loss_type='kim_bce_l1' wandb.comment='kimloss'"
 
 # "python pytorch/train_iter.py feature.audio_feature='logmel' model.name='Triple_Velocity_HPT' model.input2='onset' model.input3='exframe'"
-# "python pytorch/train_iter.py feature.audio_feature='logmel' model.name='Triple_Velocity_HPT' model.input2='onset' model.input3='exframe' exp.loss_type='kim_bce_l1' wandb.comment='kimloss'"
+# "python pytorch/train_iter.py feature.audio_feature='logmel' model.name='Triple_Velocity_HPT' model.input2='onset' model.input3='exframe' loss.loss_type='kim_bce_l1' wandb.comment='kimloss'"
 # "python pytorch/train_iter.py feature.audio_feature='logmel' model.name='Dual_Velocity_HPT' model.input2='frame'"
 # "python pytorch/train_iter.py feature.audio_feature='logmel' model.name='Dual_Velocity_HPT' model.input2='exframe'"
 # "python pytorch/train_iter.py feature.audio_feature='logmel' model.name='Triple_Velocity_HPT' model.input2='onset' model.input3='frame'"

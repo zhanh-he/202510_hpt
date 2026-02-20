@@ -64,7 +64,7 @@ def _write_training_stats(cfg, checkpoints_dir, model_name):
         f"dev_env             :{getattr(cfg.exp, 'dev_env', 'local')}",
         f"condition_check     :{condition_check}",
         f"condition_net       :{condition_net}",
-        f"loss_type           :{cfg.exp.loss_type}",
+        f"loss_type           :{cfg.loss.loss_type}",
         f"condition_type      :{condition_type}",
         f"batch_size          :{cfg.exp.batch_size}",
         f"hop_seconds         :{cfg.feature.hop_seconds}",
@@ -83,7 +83,6 @@ def train(cfg):
     # Arugments & parameters
     device = torch.device('cuda') if cfg.exp.cuda and torch.cuda.is_available() else torch.device('cpu')
     model = eval(cfg.model.name)(cfg)
-    model.kim_loss_alpha = getattr(cfg.exp, "kim_loss_alpha", 0.5)
     model = model.to(device)
     optim_params = list(model.parameters())
     opt_name = str(cfg.exp.optim).lower()
@@ -198,6 +197,7 @@ def train(cfg):
         collate_fn=collate_fn, num_workers=cfg.exp.num_workers, pin_memory=True
         )
     evaluator = SegmentEvaluator(model, cfg)
+    loss_fn = get_loss_func(cfg=cfg)
 
     # Check the number of available GPUs, use specific GPU
     gpu_count = torch.cuda.device_count()
@@ -225,7 +225,7 @@ def train(cfg):
         
         # Forward & Backward
         model.train()
-        batch_output_dict, loss = forward_pass(cfg, model, batch_data_dict, device)
+        batch_output_dict, loss = forward_pass(cfg, model, batch_data_dict, device, loss_fn)
         print(iteration, loss)
         train_loss += loss.item()
         train_loss_steps += 1
@@ -303,7 +303,7 @@ def train(cfg):
     wandb.finish()
 
 
-def forward_pass(cfg, model, batch_data_dict, device):
+def forward_pass(cfg, model, batch_data_dict, device, loss_fn):
     """
     Return model's output and computed loss for the batch.
     """
@@ -320,7 +320,7 @@ def forward_pass(cfg, model, batch_data_dict, device):
 
     # Forward pass & Compute loss
     batch_output_dict = model(*inputs)
-    loss = get_loss_func(cfg.exp.loss_type)(model, batch_output_dict, batch_data_dict)
+    loss = loss_fn(cfg, batch_output_dict, batch_data_dict)
 
     return batch_output_dict, loss
 

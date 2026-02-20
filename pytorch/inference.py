@@ -550,7 +550,11 @@ def run_folder_mode(cfg, args) -> None:
 
 
 def run_dataset_velo_score_mode(cfg, args) -> None:
-    from calculate_scores import eval_from_list, gt_to_note_list
+    from calculate_scores import (
+        detailed_f1_metrics_from_list,
+        frame_max_metrics_from_list,
+        onset_pick_metrics_from_list,
+    )
 
     checkpoint_path = _resolve_checkpoint(cfg, args.checkpoint_path)
     iteration_label = iteration_label_from_path(checkpoint_path, str(cfg.exp.ckpt_iteration))
@@ -610,9 +614,8 @@ def run_dataset_velo_score_mode(cfg, args) -> None:
             output_list = [output_entry]
             target_list = [target_entry]
 
+            frame_max_error, frame_max_std = frame_max_metrics_from_list(output_list, target_list)
             (
-                frame_max_error,
-                frame_max_std,
                 error_profile,
                 f1,
                 precision,
@@ -620,8 +623,8 @@ def run_dataset_velo_score_mode(cfg, args) -> None:
                 frame_mask_f1,
                 frame_mask_precision,
                 frame_mask_recall,
-            ) = gt_to_note_list(output_list, target_list)
-            onset_masked_error, onset_masked_std = eval_from_list(output_list, target_list)
+            ) = detailed_f1_metrics_from_list(output_list, target_list)
+            onset_masked_error, onset_masked_std = onset_pick_metrics_from_list(output_list, target_list)
 
             error_dict_path = error_dir / f"{Path(audio_name).stem}_dataset_score.npy"
             np.save(error_dict_path, np.array(error_profile, dtype=object), allow_pickle=True)
