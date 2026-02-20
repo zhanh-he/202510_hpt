@@ -4,19 +4,17 @@ import time
 import logging
 import torch
 import torch.utils.data
-import matplotlib.pyplot as plt
-import numpy as np
 
 # from torch_optimizer import Ranger
-from torch.optim import Adam
+from torch.optim import Adam, AdamW
 
-from pytorch_utils import move_data_to_device
+from pytorch_utils import move_data_to_device, log_velocity_rolls
 from data_generator import Maestro_Dataset, SMD_Dataset, MAPS_Dataset, Augmentor, Sampler, EvalSampler, collate_fn
-from utilities import create_folder, create_logging, RegressionPostProcessor
+from utilities import create_folder, create_logging
 
 # from model_HPT import Regress_onset_offset_frame_velocity_CRNN, Regress_pedal_CRNN
 from model_HPT import Single_Velocity_HPT, Dual_Velocity_HPT, Triple_Velocity_HPT
-from model_FilmUnet import FiLMUNetPretrained
+# from model_FilmUnet import FiLMUNetPretrained
 from model_DynEst import DynestAudioCNN
 from model_HPPNet import HPPNet_SP
 
@@ -27,7 +25,7 @@ from hydra import initialize, compose
 from omegaconf import OmegaConf
 import wandb
 
-# https://github.com/lessw2020/Ranger-Deep-Learning-Optimizer
+# https://github.com/lessw2020/Ranger-Deep-Learning-Optimizer for single_HPT
 
 # Initialize WandB
 def init_wandb(cfg, wandb_run_id):
@@ -43,61 +41,12 @@ def init_wandb(cfg, wandb_run_id):
     )
 
 
-def log_velocity_rolls(cfg, iteration, batch_output_dict, batch_data_dict):
-    """Log prediction vs target velocity rolls to WandB at configured intervals."""
-    interval = getattr(cfg.wandb, "log_velocity_interval", None)
-    if not interval or interval <= 0 or wandb.run is None:
-        return
-    if iteration % interval != 0:
-        return
-
-    pred = batch_output_dict.get('velocity_output')
-    target = batch_data_dict.get('velocity_roll')
-    if pred is None or target is None:
-        return
-
-    velocity_scale = getattr(cfg.feature, "velocity_scale", 128)
-    pred_img = pred[0].detach().cpu().numpy()
-    pred_max = float(np.max(pred_img))
-    pred_min = float(np.min(pred_img))
-    if pred_max > 1.0 + 1e-3 or pred_min < -1e-3:
-        # Fall back to scaling if the model outputs raw velocity values.
-        pred_vis = np.clip(pred_img / velocity_scale, 0.0, 1.0)
-    else:
-        pred_vis = np.clip(pred_img, 0.0, 1.0)
-    target_img = np.clip(target[0].detach().cpu().numpy() / velocity_scale, 0.0, 1.0)
-
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-    specs = [
-        ("Prediction", pred_vis),
-        ("Ground Truth", target_img),
-    ]
-    for ax, (title, data) in zip(axes, specs):
-        im = ax.imshow(
-            data.T,
-            aspect='auto',
-            origin='lower',
-            interpolation='nearest',
-            vmin=0.0,
-            vmax=1.0,
-        )
-        ax.set_title(title)
-        ax.set_xlabel("Frame")
-        ax.set_ylabel("Key")
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    fig.suptitle(f"Velocity roll @ iter {iteration}")
-    fig.tight_layout()
-
-    wandb.log(
-        {"velocity_roll_comparison": wandb.Image(fig)},
-        step=iteration,
-    )
-    plt.close(fig)
-
-
 def _select_velocity_metrics(statistics):
     """Return the core velocity MAE/STD metrics from a statistics dict."""
-    keep_keys = ("velocity_mae", "velocity_std")
+    keep_keys = ("frame_max_error", 
+                 "frame_max_std", 
+                 "onset_masked_error", 
+                 "onset_masked_std")
     return {k: statistics[k] for k in keep_keys if k in statistics}
 
 
@@ -136,18 +85,18 @@ def train(cfg):
     model = eval(cfg.model.name)(cfg)
     model.kim_loss_alpha = getattr(cfg.exp, "kim_loss_alpha", 0.5)
     model = model.to(device)
-    optimizer = Adam(model.parameters(), lr=cfg.exp.learning_rate)
-    
+    optim_params = list(model.parameters())
+    opt_name = str(cfg.exp.optim).lower()
+    if opt_name == "adamw":
+        optimizer = AdamW(optim_params, lr=cfg.exp.learnrate, weight_decay=cfg.exp.weight_decay)
+    elif opt_name == "adam":
+        optimizer = Adam(optim_params, lr=cfg.exp.learnrate, weight_decay=cfg.exp.weight_decay)
+    else:
+        raise ValueError(f"Unsupported optimizer: {cfg.exp.optim}")
+
     # Remove in formal
     # if cfg.model.name == 'Single_Velocity_HPT':
-    #     optimizer = Ranger(model.parameters(), lr=cfg.exp.learning_rate)
-    # else:
-    #     optimizer = Adam(model.parameters(), lr=cfg.exp.learning_rate)
-
-    # if cfg.exp.optim == "ranger":
-    #     optimizer = Ranger(model.parameters(), lr=cfg.exp.learning_rate)
-    # elif cfg.exp.optim == "adam":
-    #     optimizer = Adam(model.parameters(), lr=cfg.exp.learning_rate)
+    #     optimizer = Ranger(optim_params, lr=cfg.exp.learnrate)
 
     # Paths for results
     extras_inputs = '+'.join(filter(None, [cfg.model.input2, cfg.model.input3]))
@@ -295,15 +244,11 @@ def train(cfg):
             avg_train_loss = None
             if train_loss_steps > 0 and iteration != 0:
                 avg_train_loss = train_loss / train_loss_steps
-            raw_train_statistics = evaluator.evaluate(eval_train_loader)
-            raw_maestro_statistics = evaluator.evaluate(eval_maestro_loader)
-            raw_smd_statistics = evaluator.evaluate(eval_smd_loader)
-            raw_maps_statistics = evaluator.evaluate(eval_maps_loader)
 
-            train_statistics = _select_velocity_metrics(raw_train_statistics)
-            valid_maestro_statistics = _select_velocity_metrics(raw_maestro_statistics)
-            valid_smd_statistics = _select_velocity_metrics(raw_smd_statistics)
-            valid_maps_statistics = _select_velocity_metrics(raw_maps_statistics)
+            train_statistics = _select_velocity_metrics(evaluator.evaluate(eval_train_loader))
+            valid_maestro_statistics = _select_velocity_metrics(evaluator.evaluate(eval_maestro_loader))
+            valid_smd_statistics = _select_velocity_metrics(evaluator.evaluate(eval_smd_loader))
+            valid_maps_statistics = _select_velocity_metrics(evaluator.evaluate(eval_maps_loader))
 
             if avg_train_loss is not None:
                 logging.info(f"    Train Loss: {avg_train_loss:.4f}")
@@ -311,6 +256,7 @@ def train(cfg):
             logging.info(f"    Valid Maestro Stat: {valid_maestro_statistics}")
             logging.info(f"    Valid SMD Stat: {valid_smd_statistics}")
             logging.info(f"    Valid MAPS Stat: {valid_maps_statistics}")
+            
             log_payload = {
                 "iteration": iteration,
                 "train_stat": train_statistics,

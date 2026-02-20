@@ -2,7 +2,6 @@ wandb:
   project: "202602_hpt"
   name: "${feature.audio_feature}-${model.name}-ext${model.input2}${model.input3}-sr${feature.sample_rate}-${wandb.comment}" # -iter${exp.total_iteration}
   comment: "mel128"
-  log_velocity_interval: ${exp.eval_iteration}  # Set 0/null to disable WandB velocity roll images
 
 exp:
   # workspace: "./workspaces" #kaya
@@ -10,12 +9,13 @@ exp:
   # workspace: "/Users/hanyu/Documents/ipynb/202510_hpt_data/workspaces" #mac
   workspace: "/media/mengh/SharedData/zhanh/202510_hpt_data/workspaces" #mengh
   resume_iteration: 0
-  total_iteration: 120_000 # 200_000 # 300_000 # 360_000
+  total_iteration: 120_000  # 200_000 # 300_000 # 360_000
   save_iteration: 10_000    # 6_000 # 6_000
   eval_iteration: 10_000    # 6_000 # 6_000
-
-  learning_rate: 1e-4 # 3e-4 # 1e-4
-  optim: "adam" # "adam", "ranger", Ranger: default betas=(0.9, 0.999), eps=1e-08, weight_decay=0.
+  
+  optim: "adam"             # "adam" | "adamw" | "ranger"
+  learnrate: 1e-4 # 3e-4 # 1e-4
+  weight_decay: 0.0
   decay: True # False
   reduce_iteration: 10_000 # 6_000
   loss_type: "velocity_bce"
@@ -92,13 +92,3 @@ post:
   onset_threshold: 0.3
   offset_threshold: 0.3
   pedal_offset_threshold: 0.2
-  
-
-score:
-  evaluate_frame: True
-  evaluate_velocity: True
-  evaluate_pedal: False # No implemented yet
-  
-  onset_tolerance: 0.05 # 1
-  offset_ratio: 0.2 # null | 0.2
-  offset_min_tolerance: # 0.05 # 1
