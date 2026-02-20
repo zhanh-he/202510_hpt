@@ -263,15 +263,30 @@ class KimStyleEvaluator:
             self.checkpoint_path = Path(checkpoint_path)
             self.ckpt_iteration = self.checkpoint_path.stem.replace("_iterations", "")
         else:
-            if not cfg.exp.ckpt_iteration:
-                raise ValueError("cfg.exp.ckpt_iteration must be set for evaluation.")
-            self.ckpt_iteration = str(cfg.exp.ckpt_iteration)
-            self.checkpoint_path = (
-                Path(cfg.exp.workspace)
-                / "checkpoints"
-                / self.model_name
-                / f"{self.ckpt_iteration}_iterations.pth"
+            use_pretrained_path = (
+                cfg.model.name in {"FiLMUNetPretrained", "TransKunPretrained"}
+                and not cfg.exp.ckpt_iteration
             )
+            if use_pretrained_path:
+                if cfg.model.name == "TransKunPretrained":
+                    ckpt_value = getattr(cfg.model, "transkun_pretrained_checkpoint", None)
+                    if not ckpt_value:
+                        ckpt_value = cfg.model.pretrained_checkpoint
+                else:
+                    ckpt_value = cfg.model.pretrained_checkpoint
+
+                self.checkpoint_path = Path(ckpt_value)
+                self.ckpt_iteration = self.checkpoint_path.stem.replace("_iterations", "")
+            else:
+                if not cfg.exp.ckpt_iteration:
+                    raise ValueError("cfg.exp.ckpt_iteration must be set for evaluation.")
+                self.ckpt_iteration = str(cfg.exp.ckpt_iteration)
+                self.checkpoint_path = (
+                    Path(cfg.exp.workspace)
+                    / "checkpoints"
+                    / self.model_name
+                    / f"{self.ckpt_iteration}_iterations.pth"
+                )
 
         if not self.checkpoint_path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {self.checkpoint_path}")

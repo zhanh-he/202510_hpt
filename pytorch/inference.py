@@ -17,6 +17,7 @@ from pytorch_utils import forward, forward_velo
 from model_DynEst import DynestAudioCNN
 from model_FilmUnet import FiLMUNetPretrained
 from model_HPT import Dual_Velocity_HPT, Single_Velocity_HPT, Triple_Velocity_HPT
+from model_TransKun import TransKunPretrained
 from feature_extractor import PsychoFeatureExtractor
 from utilities import (
     OnsetsFramesPostProcessor,
@@ -95,6 +96,11 @@ class TranscriptionBase:
             self.model = model_cls(cfg)
         if os.path.getsize(checkpoint_path) == 0:
             raise ValueError(f"Checkpoint file for inference is empty: {checkpoint_path}")
+
+        if hasattr(self.model, "load_external_checkpoint"):
+            self.model.load_external_checkpoint(str(checkpoint_path), self.device)
+            self.model.to(self.device)
+            return
 
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         state_dict = checkpoint["model"] if isinstance(checkpoint, dict) and "model" in checkpoint else checkpoint
@@ -227,6 +233,17 @@ def _resolve_checkpoint(cfg, explicit_path: Optional[str]) -> Path:
             raise FileNotFoundError(
                 f"Pretrained Kim et al. checkpoint missing at {ckpt}. "
                 "Provide --checkpoint-path or update cfg.model.pretrained_checkpoint."
+            )
+        return ckpt
+
+    if cfg.model.name == "TransKunPretrained":
+        transkun_ckpt = getattr(cfg.model, "transkun_pretrained_checkpoint", None)
+        ckpt_value = transkun_ckpt if transkun_ckpt else cfg.model.pretrained_checkpoint
+        ckpt = Path(ckpt_value)
+        if not ckpt.exists():
+            raise FileNotFoundError(
+                f"Pretrained TransKun checkpoint missing at {ckpt}. "
+                "Provide --checkpoint-path or update cfg.model.transkun_pretrained_checkpoint."
             )
         return ckpt
 
@@ -884,7 +901,7 @@ if __name__ == "__main__":
 
     mode_handlers = {
         "dataset": run_dataset_mode,
-        "dataset_velo_score": run_dataset_score_mode,
+        "dataset_velo_score": run_dataset_velo_score_mode,
         "dataset_audio_score": run_dataset_audio_score_mode,
         "single": run_single_pair_mode,
         "folder": run_folder_mode,

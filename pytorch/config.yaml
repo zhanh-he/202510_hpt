@@ -5,9 +5,9 @@ wandb:
 
 exp:
   # workspace: "./workspaces" #kaya
-  # workspace: "/media/datadisk/home/22828187/zhanh/202510_hpt_data/workspaces" #uwa
+  workspace: "/media/datadisk/home/22828187/zhanh/202510_hpt_data/workspaces" #uwa
   # workspace: "/Users/hanyu/Documents/ipynb/202510_hpt_data/workspaces" #mac
-  workspace: "/media/mengh/SharedData/zhanh/202510_hpt_data/workspaces" #mengh
+  # workspace: "/media/mengh/SharedData/zhanh/202510_hpt_data/workspaces" #mengh
   resume_iteration: 0
   total_iteration: 120_000  # 200_000 # 300_000 # 360_000
   save_iteration: 10_000    # 6_000 # 6_000
@@ -74,12 +74,16 @@ model:
   #   Single_Velocity_HPT / Dual_Velocity_HPT / Triple_Velocity_HPT
   #   DynestAudioCNN
   #   FiLMUNetPretrained  -> set input2=frame (or onset) and point pretrained_checkpoint below
+  #   TransKunPretrained  -> set transkun_pretrained_checkpoint/transkun_conf (input2/input3 ignored)
   #   HPPNet_SP           -> audio-only HPPNet (velocity head only, no input2/input3)
   # -------------------------------------------------------------------------
   name: "Single_Velocity_HPT"
   input2: null # onset, offset, frame, exframe, null - None
   input3: null # onset, offset, frame, exframe, null - None
   pretrained_checkpoint: "/media/datadisk/home/22828187/zhanh/202510_hpt_data/workspaces/checkpoints/FiLMUNetPretrained+frame/1000000_iterations.pth"
+  transkun_pretrained_checkpoint: "/media/datadisk/home/22828187/zhanh/Transkun/transkun/pretrained/2.0.pt"
+  transkun_conf: "/media/datadisk/home/22828187/zhanh/Transkun/transkun/pretrained/2.0.conf"
+  transkun_repo_root: "/media/datadisk/home/22828187/zhanh/Transkun"
   hppnet_model_size: 128
 
 
