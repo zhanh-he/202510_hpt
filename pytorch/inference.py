@@ -158,6 +158,17 @@ class TranscriptionBase:
 
 class VeloTranscription(TranscriptionBase):
     def transcribe(self, audio, input2=None, input3=None, midi_path=None):
+        if isinstance(self.model, TransKunPretrained):
+            waveform = torch.from_numpy(audio[None, :]).to(self.device, dtype=torch.float32)
+            with torch.no_grad():
+                self.model.eval()
+                batch_output_dict = self.model(waveform)
+            return {
+                "output_dict": {
+                    "velocity_output": batch_output_dict["velocity_output"][0].detach().cpu().numpy()
+                }
+            }
+
         audio = audio[None, :]
         audio_len = audio.shape[1]
         audio_segments_num = int(np.ceil(audio_len / self.segment_samples))
@@ -220,55 +231,16 @@ class PianoTranscription(TranscriptionBase):
         }
 
 
-def _resolve_checkpoint(cfg, explicit_path: Optional[str]) -> Path:
+def resolve_checkpoint(cfg, explicit_path: Optional[str]) -> Path:
     if explicit_path:
-        ckpt = Path(explicit_path)
-        if not ckpt.exists():
-            raise FileNotFoundError(f"Checkpoint override {ckpt} does not exist.")
-        return ckpt
+        return Path(explicit_path)
 
-    if cfg.model.name == "FiLMUNetPretrained":
-        ckpt = Path(cfg.model.pretrained_checkpoint)
-        if not ckpt.exists():
-            raise FileNotFoundError(
-                f"Pretrained Kim et al. checkpoint missing at {ckpt}. "
-                "Provide --checkpoint-path or update cfg.model.pretrained_checkpoint."
-            )
-        return ckpt
-
-    if cfg.model.name == "TransKunPretrained":
-        transkun_ckpt = getattr(cfg.model, "transkun_pretrained_checkpoint", None)
-        ckpt_value = transkun_ckpt if transkun_ckpt else cfg.model.pretrained_checkpoint
-        ckpt = Path(ckpt_value)
-        if not ckpt.exists():
-            raise FileNotFoundError(
-                f"Pretrained TransKun checkpoint missing at {ckpt}. "
-                "Provide --checkpoint-path or update cfg.model.transkun_pretrained_checkpoint."
-            )
-        return ckpt
+    if cfg.model.name in {"FiLMUNetPretrained", "TransKunPretrained"}:
+        return Path(cfg.model.pretrained_checkpoint)
 
     if cfg.exp.ckpt_file:
-        ckpt = Path(cfg.exp.ckpt_file)
-        if ckpt.exists():
-            return ckpt
-        raise FileNotFoundError(f"cfg.exp.ckpt_file points to {ckpt}, but the file does not exist.")
-
-    if not cfg.exp.ckpt_iteration:
-        raise ValueError(
-            "cfg.exp.ckpt_iteration is empty. "
-            "Set exp.ckpt_iteration or supply --checkpoint-path when launching the script."
-        )
-
-    model_name = get_model_name(cfg)
-    ckpt = (
-        Path(cfg.exp.workspace)
-        / "checkpoints"
-        / model_name
-        / f"{cfg.exp.ckpt_iteration}_iterations.pth"
-    )
-    if not ckpt.exists():
-        raise FileNotFoundError(f"Could not locate checkpoint at {ckpt}")
-    return ckpt
+        return Path(cfg.exp.ckpt_file)
+    return Path(cfg.exp.ckpt_file)
 
 
 def _make_roll_adapter(cfg, velocity_method: str):
@@ -523,7 +495,7 @@ def _compute_audio_metrics(
 def run_single_pair_mode(cfg, args) -> None:
     if not args.input_path:
         raise ValueError("Single mode requires --input-path pointing to an audio or MIDI file.")
-    checkpoint_path = _resolve_checkpoint(cfg, args.checkpoint_path)
+    checkpoint_path = resolve_checkpoint(cfg, args.checkpoint_path)
     transcriber = VeloTranscription(checkpoint_path=str(checkpoint_path), cfg=cfg)
 
     audio_path, midi_path = resolve_audio_midi_pair(Path(args.input_path))
@@ -549,7 +521,7 @@ def run_folder_mode(cfg, args) -> None:
     output_dir = Path(args.output_dir) if args.output_dir else folder / "pred_midis"
     create_folder(str(output_dir))
 
-    checkpoint_path = _resolve_checkpoint(cfg, args.checkpoint_path)
+    checkpoint_path = resolve_checkpoint(cfg, args.checkpoint_path)
     transcriber = VeloTranscription(checkpoint_path=str(checkpoint_path), cfg=cfg)
 
     for audio_path, midi_path in pairs:
@@ -573,8 +545,8 @@ def run_dataset_velo_score_mode(cfg, args) -> None:
         onset_pick_metrics_from_list,
     )
 
-    checkpoint_path = _resolve_checkpoint(cfg, args.checkpoint_path)
-    iteration_label = iteration_label_from_path(checkpoint_path, str(cfg.exp.ckpt_iteration))
+    checkpoint_path = resolve_checkpoint(cfg, args.checkpoint_path)
+    iteration_label = iteration_label_from_path(checkpoint_path)
     transcriber = VeloTranscription(checkpoint_path=str(checkpoint_path), cfg=cfg)
 
     results_dir = (
@@ -690,8 +662,8 @@ def run_dataset_audio_score_mode(cfg, args) -> None:
     if not args.soundfont_path:
         raise ValueError("dataset_audio_score mode requires --soundfont-path for rendering.")
 
-    checkpoint_path = _resolve_checkpoint(cfg, args.checkpoint_path)
-    iteration_label = iteration_label_from_path(checkpoint_path, str(cfg.exp.ckpt_iteration))
+    checkpoint_path = resolve_checkpoint(cfg, args.checkpoint_path)
+    iteration_label = iteration_label_from_path(checkpoint_path)
     transcriber = VeloTranscription(checkpoint_path=str(checkpoint_path), cfg=cfg)
 
     results_dir = (
@@ -803,8 +775,8 @@ def run_dataset_audio_score_mode(cfg, args) -> None:
 def run_dataset_mode(cfg, args) -> None:
     if cfg.exp.run_infer and cfg.exp.run_infer.lower() != "single":
         tqdm.write("[warn] cfg.exp.run_infer != 'single'; forcing single-checkpoint inference.")
-    checkpoint_path = _resolve_checkpoint(cfg, args.checkpoint_path)
-    iteration_label = iteration_label_from_path(checkpoint_path, str(cfg.exp.ckpt_iteration))
+    checkpoint_path = resolve_checkpoint(cfg, args.checkpoint_path)
+    iteration_label = iteration_label_from_path(checkpoint_path)
 
     device = torch.device("cuda") if cfg.exp.cuda and torch.cuda.is_available() else torch.device("cpu")
     print("=" * 80)
@@ -860,7 +832,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--checkpoint-path",
         default=None,
-        help="Explicit checkpoint path. Otherwise resolved via config (and exp.ckpt_iteration).",
+        help="Explicit checkpoint path. Otherwise resolved via model/pretrained paths or exp.ckpt_file.",
     )
     parser.add_argument("--config-path", default="./", help="Hydra config path.")
     parser.add_argument("--config-name", default="config", help="Hydra config name.")
@@ -868,7 +840,7 @@ if __name__ == "__main__":
         "--overrides",
         nargs="*",
         default=[],
-        help="Optional Hydra overrides, e.g. exp.ckpt_iteration=100000 model.name=FiLMUNetPretrained",
+        help="Optional Hydra overrides, e.g. exp.ckpt_file=/path/model.pth model.name=FiLMUNetPretrained",
     )
     parser.add_argument(
         "--soundfont-path",

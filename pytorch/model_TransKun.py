@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import sys
+import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -28,6 +29,18 @@ class TransKunPretrained(nn.Module):
 
     def __init__(self, cfg):
         super().__init__()
+        warnings.filterwarnings(
+            "ignore",
+            message=r"torch\.utils\.checkpoint: please pass in use_reentrant=True or use_reentrant=False explicitly\..*",
+            category=UserWarning,
+            module=r"torch\.utils\.checkpoint",
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=r"None of the inputs have requires_grad=True\. Gradients will be None",
+            category=UserWarning,
+            module=r"torch\.utils\.checkpoint",
+        )
         self.cfg = cfg
         self.frames_per_second = int(cfg.feature.frames_per_second)
         self.classes_num = int(cfg.feature.classes_num)
@@ -115,6 +128,26 @@ class TransKunPretrained(nn.Module):
 
         self.transkun_model = model
         self.transkun_sample_rate = int(model.fs)
+        native_fps = int(round(float(model.fs) / float(model.hopSize)))
+
+        if self.input_sample_rate != self.transkun_sample_rate:
+            warnings.warn(
+                "TransKunPretrained is being evaluated with cfg.feature.sample_rate="
+                f"{self.input_sample_rate}, but pretrained model fs={self.transkun_sample_rate}. "
+                "This forces up/down-sampling and can severely degrade scores. "
+                "Recommended override: feature.sample_rate=44100 (use smd_sr44100 hdf5).",
+                UserWarning,
+            )
+
+        if self.frames_per_second != native_fps:
+            warnings.warn(
+                "TransKunPretrained velocity roll FPS is set to "
+                f"{self.frames_per_second}, while model-native fps is about {native_fps} "
+                f"(fs={model.fs}, hop={model.hopSize}). "
+                "For native timing alignment use feature.frames_per_second=43; "
+                "use 100 only if you intentionally need HPT-comparable reporting.",
+                UserWarning,
+            )
 
     def _render_roll(self, notes, duration_sec: float, expected_frames: int) -> np.ndarray:
         note_events = [

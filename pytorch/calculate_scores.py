@@ -5,10 +5,11 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import h5py
 import numpy as np
+import torch
 from hydra import compose, initialize
 from sklearn.metrics import f1_score, precision_score, recall_score
 from tqdm import tqdm
-from inference import VeloTranscription
+from inference import VeloTranscription, resolve_checkpoint
 from utilities import (
     TargetProcessor,
     create_folder,
@@ -109,6 +110,33 @@ def get_midi_sound_profile(midi_vel_roll: np.ndarray) -> List[Dict[str, np.ndarr
             vel = midi_vel_roll[pitch, duration[0]]
             sound_profile.append({"pitch": pitch, "velocity": vel, "duration": duration})
     return sound_profile
+
+
+def align_prediction_to_gt_intervals(
+    predicted_roll: np.ndarray,
+    gt_velocity_roll: np.ndarray,
+) -> np.ndarray:
+    """Project prediction onto GT note intervals (velocity-only evaluation mode)."""
+    frames = min(predicted_roll.shape[0], gt_velocity_roll.shape[0])
+    pred = predicted_roll[:frames]
+    gt = gt_velocity_roll[:frames]
+    aligned = np.zeros_like(pred, dtype=np.float32)
+
+    gt_t = np.transpose(gt)
+    pred_t = np.transpose(pred)
+    gt_profile = get_midi_sound_profile(gt_t)
+
+    for note_profile in gt_profile:
+        pitch = int(note_profile["pitch"])
+        start, end = note_profile["duration"]
+        if end <= start:
+            continue
+        pred_note = pred_t[pitch][start:end].copy()
+        pred_note[pred_note <= 0.0001] = 0
+        picked = float(np.max(pred_note)) if pred_note.size else 0.0
+        aligned[start:end, pitch] = picked
+
+    return aligned
 
 
 def _collect_eval_arrays(output_dict_list: Sequence[Dict[str, np.ndarray]], target_list: Sequence[Dict[str, np.ndarray]]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -229,6 +257,11 @@ def onset_pick_metrics_from_list(output_dict_list: Sequence[Dict[str, np.ndarray
     return mean_error, std_error
 
 
+def _model_param_sizes(model: torch.nn.Module) -> Tuple[int, float, float]:
+    params_count = int(sum(p.numel() for p in model.parameters()))
+    return params_count, float(params_count / 1e3), float(params_count / 1e6)
+
+
 class KimStyleEvaluator:
     """Run HPT inference and compute Kim et al. evaluation metrics."""
 
@@ -261,32 +294,9 @@ class KimStyleEvaluator:
 
         if checkpoint_path:
             self.checkpoint_path = Path(checkpoint_path)
-            self.ckpt_iteration = self.checkpoint_path.stem.replace("_iterations", "")
         else:
-            use_pretrained_path = (
-                cfg.model.name in {"FiLMUNetPretrained", "TransKunPretrained"}
-                and not cfg.exp.ckpt_iteration
-            )
-            if use_pretrained_path:
-                if cfg.model.name == "TransKunPretrained":
-                    ckpt_value = getattr(cfg.model, "transkun_pretrained_checkpoint", None)
-                    if not ckpt_value:
-                        ckpt_value = cfg.model.pretrained_checkpoint
-                else:
-                    ckpt_value = cfg.model.pretrained_checkpoint
-
-                self.checkpoint_path = Path(ckpt_value)
-                self.ckpt_iteration = self.checkpoint_path.stem.replace("_iterations", "")
-            else:
-                if not cfg.exp.ckpt_iteration:
-                    raise ValueError("cfg.exp.ckpt_iteration must be set for evaluation.")
-                self.ckpt_iteration = str(cfg.exp.ckpt_iteration)
-                self.checkpoint_path = (
-                    Path(cfg.exp.workspace)
-                    / "checkpoints"
-                    / self.model_name
-                    / f"{self.ckpt_iteration}_iterations.pth"
-                )
+            self.checkpoint_path = resolve_checkpoint(cfg, explicit_path=None)
+        self.ckpt_iteration = self.checkpoint_path.stem.replace("_iterations", "")
 
         if not self.checkpoint_path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {self.checkpoint_path}")
@@ -344,6 +354,12 @@ class KimStyleEvaluator:
                 "cfg": self.cfg,
             }
             predicted_roll = self.roll_adapter(output_dict, target_dict, context)
+
+        if self.cfg.model.name == "TransKunPretrained":
+            predicted_roll = align_prediction_to_gt_intervals(
+                predicted_roll=predicted_roll,
+                gt_velocity_roll=target_dict["velocity_roll"],
+            )
 
         align_len = min(predicted_roll.shape[0], target_dict["velocity_roll"].shape[0])
 
@@ -437,14 +453,17 @@ def run_kim_evaluation(
 def main() -> None:
     initialize(config_path="./", job_name="kim_eval", version_base=None)
     cfg = compose(config_name="config", overrides=sys.argv[1:])
+    evaluator = KimStyleEvaluator(cfg)
+    params_count, params_k, params_m = _model_param_sizes(evaluator.transcriptor.model)
 
     print("=" * 80)
     print("Evaluation Mode : Kim et al.")
     print(f"Model Name      : {get_model_name(cfg)}")
     print(f"Test Set        : {cfg.dataset.test_set}")
+    print(f"Params          : {params_count:,} ({params_k:.2f}K, {params_m:.2f}M)")
     print("=" * 80)
 
-    stats_dict = run_kim_evaluation(cfg)
+    stats_dict = evaluator.run()
 
     if not stats_dict:
         print("No test files processed.")

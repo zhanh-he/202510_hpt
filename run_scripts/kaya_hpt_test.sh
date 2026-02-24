@@ -78,7 +78,7 @@ MODEL_CONFIGS=(
     "model.name='Triple_Velocity_HPT' model.input2='frame' model.input3='exframe'"
 )
 
-DATASET='maps' # 'smd', 'maps', or 'maestro'
+DATASET='smd' # 'smd', 'maps', or 'maestro'
 
 # Get the specific config based on SLURM_ARRAY_TASK_ID
 CONFIG=${MODEL_CONFIGS[$SLURM_ARRAY_TASK_ID]}
