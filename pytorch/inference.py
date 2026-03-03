@@ -17,6 +17,8 @@ from pytorch_utils import forward, forward_velo
 from model_DynEst import DynestAudioCNN
 from model_FilmUnet import FiLMUNetPretrained
 from model_HPT import Dual_Velocity_HPT, Single_Velocity_HPT, Triple_Velocity_HPT
+from model_scoreHPT import ScoreNoteEditor_HPT, ScoreHPT
+from model_scoreHPT_bilstm import ScoreBiLSTM_HPT, ScoreHPT_BiLSTM
 from model_TransKun import TransKunPretrained
 from feature_extractor import PsychoFeatureExtractor
 from utilities import (

@@ -71,6 +71,8 @@ model:
   # -------------------------------------------------------------------------
   # name options:
   #   Single_Velocity_HPT / Dual_Velocity_HPT / Triple_Velocity_HPT
+  #   ScoreNoteEditor_HPT (or ScoreHPT alias): note-editor + HPT
+  #   ScoreBiLSTM_HPT (or ScoreHPT_BiLSTM alias): score-informed BiLSTM + HPT
   #   DynestAudioCNN
   #   FiLMUNetPretrained  -> set input2=frame (or onset), pretrained_checkpoint, film_repo_root
   #   TransKunPretrained  -> set pretrained_checkpoint/transkun_conf (input2/input3 ignored)
@@ -84,6 +86,24 @@ model:
   transkun_conf: "/media/datadisk/home/22828187/zhanh/Transkun/transkun/pretrained/2.0.conf"
   transkun_repo_root: "/media/datadisk/home/22828187/zhanh/Transkun"
   hppnet_model_size: 128
+  score_hpt:
+    arch: "conformer"        # "conformer" | "transformer"
+    d_model: 128
+    n_layers: 2
+    n_heads: 4
+    dropout: 0.1
+    alpha: 0.2
+    max_frames: 4096
+    onset_threshold: 0.5
+    use_cond_feats: null     # e.g. [frame] or [exframe], default follows model.input3
+  score_hpt_bilstm:
+    in_feats: ["vel_logits"] # choose from ["vel", "vel_logits"]
+    cond_keys: null          # default follows [model.input2, model.input3]
+    hidden: 256
+    num_layers: 2
+    dropout: 0.1
+    mode: "residual"         # "direct" | "residual"
+    alpha: 0.2
 
 
 post:

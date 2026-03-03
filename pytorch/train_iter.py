@@ -14,6 +14,8 @@ from utilities import create_folder, create_logging
 
 # from model_HPT import Regress_onset_offset_frame_velocity_CRNN, Regress_pedal_CRNN
 from model_HPT import Single_Velocity_HPT, Dual_Velocity_HPT, Triple_Velocity_HPT
+from model_scoreHPT import ScoreNoteEditor_HPT, ScoreHPT
+from model_scoreHPT_bilstm import ScoreBiLSTM_HPT, ScoreHPT_BiLSTM
 # from model_FilmUnet import FiLMUNetPretrained
 from model_DynEst import DynestAudioCNN
 from model_HPPNet import HPPNet_SP
